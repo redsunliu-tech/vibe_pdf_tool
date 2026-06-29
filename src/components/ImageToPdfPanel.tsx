@@ -5,8 +5,9 @@ import {
   convertImagesToPdf,
   getImageDimensions,
   type ImageInput,
-  type PageSize,
   type Orientation,
+  type PageSize,
+  type PdfOutputMode,
 } from '../lib/imageToPdf';
 import { downloadBlob, formatBytes } from '../lib/pdfToImage';
 
@@ -23,14 +24,20 @@ const ORIENTATION_OPTIONS: { value: Orientation; label: string }[] = [
   { value: 'landscape', label: 'Landscape' },
 ];
 
+const OUTPUT_MODE_OPTIONS: { value: PdfOutputMode; label: string; description: string }[] = [
+  { value: 'single', label: 'Merge into one PDF', description: 'All images become pages in a single file' },
+  { value: 'multiple', label: 'One PDF per image', description: 'Each image becomes an independent PDF file' },
+];
+
 export function ImageToPdfPanel() {
   const [images, setImages] = useState<ImageInput[]>([]);
   const [pageSize, setPageSize] = useState<PageSize>('a4');
   const [orientation, setOrientation] = useState<Orientation>('auto');
   const [margin, setMargin] = useState(10);
+  const [outputMode, setOutputMode] = useState<PdfOutputMode>('single');
   const [converting, setConverting] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [resultBlob, setResultBlob] = useState<Blob | null>(null);
+  const [resultBlobs, setResultBlobs] = useState<Blob[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -50,7 +57,7 @@ export function ImageToPdfPanel() {
         inputs.push({ file, dataUrl: dims.dataUrl, width: dims.width, height: dims.height });
       }
       setImages((prev) => [...prev, ...inputs]);
-      setResultBlob(null);
+      setResultBlobs([]);
     } catch {
       setError('Failed to read one or more images.');
     } finally {
@@ -60,7 +67,7 @@ export function ImageToPdfPanel() {
 
   const handleRemove = (index: number) => {
     setImages((prev) => prev.filter((_, i) => i !== index));
-    setResultBlob(null);
+    setResultBlobs([]);
   };
 
   const handleMove = (index: number, dir: -1 | 1) => {
@@ -71,12 +78,12 @@ export function ImageToPdfPanel() {
       [next[index], next[target]] = [next[target], next[index]];
       return next;
     });
-    setResultBlob(null);
+    setResultBlobs([]);
   };
 
   const handleClear = () => {
     setImages([]);
-    setResultBlob(null);
+    setResultBlobs([]);
     setError(null);
     setProgress(0);
   };
@@ -86,25 +93,26 @@ export function ImageToPdfPanel() {
     setConverting(true);
     setError(null);
     setProgress(0);
-    setResultBlob(null);
+    setResultBlobs([]);
     try {
-      const blob = await convertImagesToPdf(images, {
+      const blobs = await convertImagesToPdf(images, {
         pageSize,
         orientation,
         margin,
+        outputMode,
         onProgress: (current, total) => setProgress(Math.round((current / total) * 100)),
       });
-      setResultBlob(blob);
+      setResultBlobs(Array.isArray(blobs) ? blobs : [blobs]);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Conversion failed');
     } finally {
       setConverting(false);
     }
-  }, [images, pageSize, orientation, margin]);
+  }, [images, pageSize, orientation, margin, outputMode]);
 
-  const handleDownload = () => {
-    if (!resultBlob) return;
-    downloadBlob(resultBlob, 'converted.pdf');
+  const handleDownload = (blob: Blob, index: number) => {
+    const fileName = outputMode === 'single' ? 'converted.pdf' : `converted-${index + 1}.pdf`;
+    downloadBlob(blob, fileName);
   };
 
   return (
@@ -265,6 +273,26 @@ export function ImageToPdfPanel() {
                     </div>
 
                     <div className="sm:col-span-2">
+                      <label className="mb-2 block text-sm font-medium text-slate-600">Output Mode</label>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        {OUTPUT_MODE_OPTIONS.map((opt) => (
+                          <button
+                            key={opt.value}
+                            onClick={() => setOutputMode(opt.value)}
+                            className={`rounded-xl border px-4 py-3 text-left transition-all ${
+                              outputMode === opt.value
+                                ? 'border-sky-500 bg-sky-50 text-sky-700 shadow-sm'
+                                : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50'
+                            }`}
+                          >
+                            <span className="block text-sm font-semibold">{opt.label}</span>
+                            <span className="mt-1 block text-xs opacity-80">{opt.description}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="sm:col-span-2">
                       <label className="mb-2 flex items-center justify-between text-sm font-medium text-slate-600">
                         <span>Page Margin</span>
                         <span className="text-sky-600">{margin} mm</span>
@@ -299,7 +327,7 @@ export function ImageToPdfPanel() {
             ) : (
               <>
                 <FileStack className="h-5 w-5" />
-                Create PDF
+                {outputMode === 'single' ? 'Create PDF' : 'Create PDFs'}
               </>
             )}
           </button>
@@ -319,22 +347,33 @@ export function ImageToPdfPanel() {
             </div>
           )}
 
-          {resultBlob && (
-            <div className="flex flex-col items-center gap-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-6 sm:flex-row sm:justify-between">
-              <div className="flex items-center gap-3">
+          {resultBlobs.length > 0 && (
+            <div className="flex flex-col gap-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-6">
+              <div className="flex items-start gap-3">
                 <CheckCircle2 className="h-8 w-8 text-emerald-500" />
                 <div>
-                  <p className="font-medium text-emerald-800">PDF created successfully!</p>
-                  <p className="text-sm text-emerald-600">{formatBytes(resultBlob.size)} · {images.length} pages</p>
+                  <p className="font-medium text-emerald-800">
+                    {outputMode === 'single' ? 'PDF created successfully!' : `${resultBlobs.length} PDFs created successfully!`}
+                  </p>
+                  <p className="text-sm text-emerald-600">
+                    {outputMode === 'single'
+                      ? `${formatBytes(resultBlobs[0].size)} · ${images.length} pages`
+                      : `${resultBlobs.length} files · ${images.length} image${images.length !== 1 ? 's' : ''}`}
+                  </p>
                 </div>
               </div>
-              <button
-                onClick={handleDownload}
-                className="flex items-center gap-2 rounded-xl bg-emerald-500 px-6 py-3 font-semibold text-white shadow-lg shadow-emerald-500/25 transition-all hover:bg-emerald-600"
-              >
-                <Download className="h-5 w-5" />
-                Download PDF
-              </button>
+              <div className="flex flex-wrap gap-2">
+                {resultBlobs.map((blob, index) => (
+                  <button
+                    key={`${index}-${blob.size}`}
+                    onClick={() => handleDownload(blob, index)}
+                    className="flex items-center gap-2 rounded-xl bg-emerald-500 px-4 py-2.5 font-semibold text-white shadow-lg shadow-emerald-500/25 transition-all hover:bg-emerald-600"
+                  >
+                    <Download className="h-4 w-4" />
+                    {outputMode === 'single' ? 'Download PDF' : `Download PDF ${index + 1}`}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
         </div>
