@@ -26,7 +26,7 @@ function App() {
             PDF Converter
           </h1>
           <p className="mx-auto mt-3 max-w-md text-slate-500">
-            Convert PDF documents to images, or combine images into a single PDF — fast, free, and entirely in your browser.
+            Convert a single PDF to image/images, or image/images into a single PDF — fast, free, and entirely in your browser.
           </p>
           <div className="mt-5 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-xs font-medium text-slate-400">
             <span className="flex items-center gap-1.5">
