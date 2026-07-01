@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Image as ImageIcon, Download, Trash2, Loader2, Settings2, FileStack, CheckCircle2, GripVertical, X } from 'lucide-react';
 import { Dropzone } from './Dropzone';
 import {
@@ -41,6 +41,23 @@ export function ImageToPdfPanel() {
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [loading, setLoading] = useState(false);
+  const previewUrlsRef = useRef<string[]>([]);
+  const fileReadRequestRef = useRef(0);
+
+  const syncPreviewUrls = useCallback((nextImages: ImageInput[]) => {
+    const nextUrls = nextImages.map((img) => img.previewUrl);
+    previewUrlsRef.current
+      .filter((url) => !nextUrls.includes(url))
+      .forEach((url) => URL.revokeObjectURL(url));
+    previewUrlsRef.current = nextUrls;
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      previewUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+      previewUrlsRef.current = [];
+    };
+  }, [syncPreviewUrls]);
 
   const handleFiles = useCallback(async (files: File[]) => {
     const valid = files.filter((f) => f.type.startsWith('image/'));
@@ -48,25 +65,49 @@ export function ImageToPdfPanel() {
       setError('Please select valid image files (PNG, JPG, BMP, WebP).');
       return;
     }
+    const requestId = ++fileReadRequestRef.current;
     setError(null);
     setLoading(true);
     try {
       const inputs: ImageInput[] = [];
       for (const file of valid) {
         const dims = await getImageDimensions(file);
-        inputs.push({ file, dataUrl: dims.dataUrl, width: dims.width, height: dims.height });
+        inputs.push({
+          file,
+          dataUrl: dims.dataUrl,
+          previewUrl: URL.createObjectURL(file),
+          width: dims.width,
+          height: dims.height,
+        });
       }
-      setImages((prev) => [...prev, ...inputs]);
+      setImages((prev) => {
+        if (requestId !== fileReadRequestRef.current) {
+          inputs.forEach((input) => URL.revokeObjectURL(input.previewUrl));
+          return prev;
+        }
+        const next = [...prev, ...inputs];
+        syncPreviewUrls(next);
+        return next;
+      });
       setResultBlobs([]);
     } catch {
-      setError('Failed to read one or more images.');
+      if (requestId === fileReadRequestRef.current) {
+        setError('Failed to read one or more images.');
+      }
     } finally {
-      setLoading(false);
+      if (requestId === fileReadRequestRef.current) {
+        setLoading(false);
+      }
     }
   }, []);
 
   const handleRemove = (index: number) => {
-    setImages((prev) => prev.filter((_, i) => i !== index));
+    fileReadRequestRef.current += 1;
+    setImages((prev) => {
+      const next = prev.filter((_, i) => i !== index);
+      syncPreviewUrls(next);
+      return next;
+    });
     setResultBlobs([]);
   };
 
@@ -82,7 +123,11 @@ export function ImageToPdfPanel() {
   };
 
   const handleClear = () => {
-    setImages([]);
+    fileReadRequestRef.current += 1;
+    setImages(() => {
+      syncPreviewUrls([]);
+      return [];
+    });
     setResultBlobs([]);
     setError(null);
     setProgress(0);
@@ -198,7 +243,7 @@ export function ImageToPdfPanel() {
                 </div>
                 <span className="w-6 text-center text-sm font-medium text-slate-400">{i + 1}</span>
                 <div className="h-14 w-14 shrink-0 overflow-hidden rounded-lg bg-slate-100">
-                  <img src={img.dataUrl} alt={img.file.name} className="h-full w-full object-cover" />
+                  <img src={img.previewUrl} alt={img.file.name} className="h-full w-full object-cover" />
                 </div>
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-medium text-slate-700">{img.file.name}</p>

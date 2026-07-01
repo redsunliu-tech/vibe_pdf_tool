@@ -8,7 +8,7 @@ export type ImageFormat = 'png' | 'jpg' | 'bmp' | 'webp';
 export interface PdfPageResult {
   pageNumber: number;
   blob: Blob;
-  dataUrl: string;
+  previewUrl: string;
   width: number;
   height: number;
 }
@@ -94,12 +94,12 @@ export async function convertPdfToImages(
     await page.render({ canvas, canvasContext: context, viewport }).promise;
 
     const blob = await canvasToFormatBlob(canvas, options.format, options.quality);
-    const dataUrl = canvas.toDataURL(MIME_TYPES[options.format === 'bmp' ? 'png' : options.format], options.quality);
+    const previewUrl = URL.createObjectURL(blob);
 
     results.push({
       pageNumber: i,
       blob,
-      dataUrl,
+      previewUrl,
       width: canvas.width,
       height: canvas.height,
     });

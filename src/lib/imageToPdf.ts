@@ -15,6 +15,7 @@ export interface ImageConvertOptions {
 export interface ImageInput {
   file: File;
   dataUrl: string;
+  previewUrl: string;
   width: number;
   height: number;
 }

@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { FileText, Download, Trash2, Loader2, Settings2, Images, CheckCircle2 } from 'lucide-react';
 import { Dropzone } from './Dropzone';
 import {
@@ -35,6 +35,23 @@ export function PdfToImagePanel() {
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const fileRef = useRef<File | null>(null);
+  const previewUrlsRef = useRef<string[]>([]);
+  const conversionRequestRef = useRef(0);
+
+  const syncPreviewUrls = useCallback((nextResults: PdfPageResult[]) => {
+    const nextUrls = nextResults.map((page) => page.previewUrl);
+    previewUrlsRef.current
+      .filter((url) => !nextUrls.includes(url))
+      .forEach((url) => URL.revokeObjectURL(url));
+    previewUrlsRef.current = nextUrls;
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      previewUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+      previewUrlsRef.current = [];
+    };
+  }, [syncPreviewUrls]);
 
   const handleFiles = useCallback((files: File[]) => {
     const pdf = files.find((f) => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'));
@@ -50,6 +67,7 @@ export function PdfToImagePanel() {
 
   const handleConvert = useCallback(async () => {
     if (!file) return;
+    const requestId = ++conversionRequestRef.current;
     setConverting(true);
     setError(null);
     setProgress(0);
@@ -63,11 +81,20 @@ export function PdfToImagePanel() {
         quality,
         onProgress: (current, total) => setProgress(Math.round((current / total) * 100)),
       });
+      if (requestId !== conversionRequestRef.current) {
+        pages.forEach((page) => URL.revokeObjectURL(page.previewUrl));
+        return;
+      }
+      syncPreviewUrls(pages);
       setResults(pages);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Conversion failed');
+      if (requestId === conversionRequestRef.current) {
+        setError(err instanceof Error ? err.message : 'Conversion failed');
+      }
     } finally {
-      setConverting(false);
+      if (requestId === conversionRequestRef.current) {
+        setConverting(false);
+      }
     }
   }, [file, format, minResolution, quality]);
 
@@ -84,6 +111,8 @@ export function PdfToImagePanel() {
   };
 
   const handleReset = () => {
+    conversionRequestRef.current += 1;
+    syncPreviewUrls([]);
     setFile(null);
     setResults([]);
     setError(null);
@@ -242,7 +271,7 @@ export function PdfToImagePanel() {
                   <div key={page.pageNumber} className="group overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm transition-all hover:shadow-md">
                     <div className="relative aspect-[3/4] overflow-hidden bg-slate-100">
                       <img
-                        src={page.dataUrl}
+                        src={page.previewUrl}
                         alt={`Page ${page.pageNumber}`}
                         className="h-full w-full object-contain"
                       />
