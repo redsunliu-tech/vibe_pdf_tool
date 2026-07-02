@@ -86,6 +86,7 @@ export function ImageToPdfPanel() {
       setError('Please select valid image files (PNG, JPG, BMP, WebP).');
       return;
     }
+    setProgress(0); // ✅ Add this line to hide results panel
     const requestId = ++fileReadRequestRef.current;
     setError(null);
     setLoading(true);
@@ -129,6 +130,7 @@ export function ImageToPdfPanel() {
       syncPreviewUrls(next);
       return next;
     });
+    setProgress(0); // ✅ Add this line to hide results panel
   //  setResultBlobs([]);
   };
 
@@ -278,7 +280,7 @@ export function ImageToPdfPanel() {
     <div className="space-y-6">
       {images.length === 0 && (
         <Dropzone
-          accept="image/*,.bmp,.jpg,.jpeg,.png,.webp"
+          accept="image/png,image/jpeg,image/bmp,image/webp,.png,.jpg,.jpeg,.bmp,.webp"
           title="Drop images here"
           subtitle="or click to browse — PNG, JPG, BMP, WebP supported"
           icon={<ImageIcon className="h-8 w-8" />}
@@ -311,7 +313,7 @@ export function ImageToPdfPanel() {
               <input
                 id="img-add-more"
                 type="file"
-                accept="image/*,.bmp,.jpg,.jpeg,.png,.webp"
+                accept="image/png,image/jpeg,image/bmp,image/webp,.png,.jpg,.jpeg,.bmp,.webp"
                 multiple
                 className="hidden"
                 onChange={(e) => {
