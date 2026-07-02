@@ -37,12 +37,13 @@ export function ImageToPdfPanel() {
   const [outputMode, setOutputMode] = useState<PdfOutputMode>('single');
   const [converting, setConverting] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [resultBlobs, setResultBlobs] = useState<Blob[]>([]);
+  //const [resultBlobs, setResultBlobs] = useState<Blob[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [loading, setLoading] = useState(false);
   const previewUrlsRef = useRef<string[]>([]);
   const fileReadRequestRef = useRef(0);
+  const pdfCache = useRef<Map<number, Blob>>(new Map()); // Cache for generated PDFs
 
   const syncPreviewUrls = useCallback((nextImages: ImageInput[]) => {
     const nextUrls = nextImages.map((img) => img.previewUrl);
@@ -58,6 +59,26 @@ export function ImageToPdfPanel() {
       previewUrlsRef.current = [];
     };
   }, [syncPreviewUrls]);
+
+  useEffect(() => {
+    const handleClearAll = () => {
+      // Clear all state and resources
+      setImages([]);
+      setConverting(false);
+      setError(null);
+      setProgress(0);
+      pdfCache.current.clear(); 
+      // Clear any blob URLs if you have them
+      images.forEach(img => {
+        if (img.previewUrl) {
+          URL.revokeObjectURL(img.previewUrl);
+        }
+      });
+    };
+
+    window.addEventListener('pdf-tool:clear-all', handleClearAll);
+    return () => window.removeEventListener('pdf-tool:clear-all', handleClearAll);
+  }, [images]);
 
   const handleFiles = useCallback(async (files: File[]) => {
     const valid = files.filter((f) => f.type.startsWith('image/'));
@@ -89,7 +110,7 @@ export function ImageToPdfPanel() {
         syncPreviewUrls(next);
         return next;
       });
-      setResultBlobs([]);
+    //  setResultBlobs([]);
     } catch {
       if (requestId === fileReadRequestRef.current) {
         setError('Failed to read one or more images.');
@@ -108,7 +129,7 @@ export function ImageToPdfPanel() {
       syncPreviewUrls(next);
       return next;
     });
-    setResultBlobs([]);
+  //  setResultBlobs([]);
   };
 
   const handleMove = (index: number, dir: -1 | 1) => {
@@ -119,7 +140,7 @@ export function ImageToPdfPanel() {
       [next[index], next[target]] = [next[target], next[index]];
       return next;
     });
-    setResultBlobs([]);
+  //  setResultBlobs([]);
   };
 
   const handleClear = () => {
@@ -128,37 +149,130 @@ export function ImageToPdfPanel() {
       syncPreviewUrls([]);
       return [];
     });
-    setResultBlobs([]);
+  //  setResultBlobs([]);
+    pdfCache.current.clear();
     setError(null);
     setProgress(0);
   };
 
-  const handleConvert = useCallback(async () => {
+  const handleConvert = useCallback(() => {
     if (!images.length) return;
-    setConverting(true);
+    setConverting(false);
     setError(null);
-    setProgress(0);
-    setResultBlobs([]);
+    setProgress(100); // Show completion state without generating PDFs
+    // PDFs will be generated on-demand when user clicks download
+  }, [images]);
+
+  const generatePdf = useCallback(async (index?: number): Promise<Blob[]> => {
+    setConverting(true);
+    
     try {
+      // Determine output mode for this generation
+      const generationMode = index !== undefined ? 'multiple' : outputMode;
+      
       const blobs = await convertImagesToPdf(images, {
         pageSize,
         orientation,
         margin,
-        outputMode,
+        outputMode: generationMode,
         onProgress: (current, total) => setProgress(Math.round((current / total) * 100)),
       });
-      setResultBlobs(Array.isArray(blobs) ? blobs : [blobs]);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Conversion failed');
+      
+      const result = Array.isArray(blobs) ? blobs : [blobs];
+      
+      // Cache the generated PDFs
+      if (generationMode === 'single') {
+        pdfCache.current.set(0, result[0]);
+      } else if (index !== undefined) {
+        // For individual page generation in multiple mode
+        pdfCache.current.set(index, result[0]);
+      } else {
+        // For all pages in multiple mode
+        result.forEach((blob, i) => {
+          pdfCache.current.set(i, blob);
+        });
+      }
+      
+      return result;
     } finally {
       setConverting(false);
     }
   }, [images, pageSize, orientation, margin, outputMode]);
 
-  const handleDownload = (blob: Blob, index: number) => {
-    const fileName = outputMode === 'single' ? 'converted.pdf' : `converted-${index + 1}.pdf`;
-    downloadBlob(blob, fileName);
-  };
+  const handleDownload = useCallback(async (index?: number) => {
+    if (!images.length) return;
+    
+    try {
+      let blobs: Blob[];
+      
+      // Check cache first
+      if (outputMode === 'single') {
+        const cached = pdfCache.current.get(0);
+        if (cached) {
+          blobs = [cached];
+        } else {
+          blobs = await generatePdf();
+        }
+      } else {
+        const cacheKey = index ?? 0;
+        const cached = pdfCache.current.get(cacheKey);
+        if (cached) {
+          blobs = [cached];
+        } else {
+          blobs = await generatePdf(index);
+        }
+      }
+      
+      // Download the PDF
+      const fileName = outputMode === 'single' 
+        ? 'converted.pdf' 
+        : `converted-${(index ?? 0) + 1}.pdf`;
+      
+      downloadBlob(blobs[0], fileName);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Download failed');
+    }
+  }, [images, outputMode, generatePdf]);
+
+  // Add this new function after handleDownload
+  const handleDownloadAll = useCallback(async () => {
+    if (!images.length || outputMode !== 'multiple') return;
+    
+    setConverting(true);
+    
+    try {
+      // Dynamically import zipUtils only when needed
+      const { downloadAsZip } = await import('../lib/zipUtils');
+      
+      const zipFiles: { blob: Blob; filename: string }[] = [];
+      
+      // Generate all PDFs (checking cache first)
+      for (let i = 0; i < images.length; i++) {
+        const cached = pdfCache.current.get(i);
+        
+        if (cached) {
+          zipFiles.push({ blob: cached, filename: `converted-${i + 1}.pdf` });
+        } else {
+          const blobs = await generatePdf(i);
+          if (blobs.length > 0) {
+            zipFiles.push({ blob: blobs[0], filename: `converted-${i + 1}.pdf` });
+          }
+        }
+        
+        setProgress(Math.round(((i + 1) / images.length) * 100));
+      }
+      
+      // Download as ZIP
+      await downloadAsZip(zipFiles, 'converted');
+      
+      // Clear cache after full download to free memory
+      pdfCache.current.clear();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Download failed');
+    } finally {
+      setConverting(false);
+    }
+  }, [images, outputMode, generatePdf]);
 
   return (
     <div className="space-y-6">
@@ -242,7 +356,7 @@ export function ImageToPdfPanel() {
                   </button>
                 </div>
                 <span className="w-6 text-center text-sm font-medium text-slate-400">{i + 1}</span>
-                <div className="h-14 w-14 shrink-0 overflow-hidden rounded-lg bg-slate-100">
+                <div className="h-16 w-16 shrink-0 overflow-hidden rounded-lg bg-slate-100">
                   <img src={img.previewUrl} alt={img.file.name} className="h-full w-full object-cover" />
                 </div>
                 <div className="min-w-0 flex-1">
@@ -296,6 +410,26 @@ export function ImageToPdfPanel() {
                   </div>
                 </div>
 
+                <div className="sm:col-span-2">
+                  <label className="mb-2 block text-sm font-medium text-slate-600">Output Mode</label>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {OUTPUT_MODE_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.value}
+                        onClick={() => setOutputMode(opt.value)}
+                        className={`rounded-xl border px-4 py-3 text-left transition-all ${
+                          outputMode === opt.value
+                            ? 'border-sky-500 bg-sky-50 text-sky-700 shadow-sm'
+                            : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50'
+                        }`}
+                      >
+                        <span className="block text-sm font-semibold">{opt.label}</span>
+                        <span className="mt-1 block text-xs opacity-80">{opt.description}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
                 {pageSize !== 'fit' && (
                   <>
                     <div>
@@ -312,26 +446,6 @@ export function ImageToPdfPanel() {
                             }`}
                           >
                             {opt.label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div className="sm:col-span-2">
-                      <label className="mb-2 block text-sm font-medium text-slate-600">Output Mode</label>
-                      <div className="grid gap-2 sm:grid-cols-2">
-                        {OUTPUT_MODE_OPTIONS.map((opt) => (
-                          <button
-                            key={opt.value}
-                            onClick={() => setOutputMode(opt.value)}
-                            className={`rounded-xl border px-4 py-3 text-left transition-all ${
-                              outputMode === opt.value
-                                ? 'border-sky-500 bg-sky-50 text-sky-700 shadow-sm'
-                                : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50'
-                            }`}
-                          >
-                            <span className="block text-sm font-semibold">{opt.label}</span>
-                            <span className="mt-1 block text-xs opacity-80">{opt.description}</span>
                           </button>
                         ))}
                       </div>
@@ -372,7 +486,7 @@ export function ImageToPdfPanel() {
             ) : (
               <>
                 <FileStack className="h-5 w-5" />
-                {outputMode === 'single' ? 'Create PDF' : 'Create PDFs'}
+                {outputMode === 'single' ? 'Prepare PDF' : 'Prepare PDFs'}
               </>
             )}
           </button>
@@ -392,32 +506,54 @@ export function ImageToPdfPanel() {
             </div>
           )}
 
-          {resultBlobs.length > 0 && (
+          {images.length > 0 && progress === 100 && !error && !converting && (
             <div className="flex flex-col gap-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-6">
               <div className="flex items-start gap-3">
                 <CheckCircle2 className="h-8 w-8 text-emerald-500" />
                 <div>
                   <p className="font-medium text-emerald-800">
-                    {outputMode === 'single' ? 'PDF created successfully!' : `${resultBlobs.length} PDFs created successfully!`}
+                    Ready to create {outputMode === 'single' ? 'PDF' : 'PDFs'}!
                   </p>
                   <p className="text-sm text-emerald-600">
-                    {outputMode === 'single'
-                      ? `${formatBytes(resultBlobs[0].size)} · ${images.length} pages`
-                      : `${resultBlobs.length} files · ${images.length} image${images.length !== 1 ? 's' : ''}`}
+                    {images.length} image{images.length !== 1 ? 's' : ''}
                   </p>
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
-                {resultBlobs.map((blob, index) => (
+                {outputMode === 'single' ? (
+                  // Single PDF mode - just one download button
                   <button
-                    key={`${index}-${blob.size}`}
-                    onClick={() => handleDownload(blob, index)}
-                    className="flex items-center gap-2 rounded-xl bg-emerald-500 px-4 py-2.5 font-semibold text-white shadow-lg shadow-emerald-500/25 transition-all hover:bg-emerald-600"
+                    onClick={() => handleDownload()}
+                    disabled={converting}
+                    className="flex items-center gap-2 rounded-xl bg-emerald-500 px-4 py-2.5 font-semibold text-white shadow-lg shadow-emerald-500/25 transition-all hover:bg-emerald-600 disabled:opacity-60"
                   >
                     <Download className="h-4 w-4" />
-                    {outputMode === 'single' ? 'Download PDF' : `Download PDF ${index + 1}`}
+                    Download PDF
                   </button>
-                ))}
+                ) : (
+                  // Multiple PDFs mode - individual downloads + ZIP option
+                  <>
+                    {images.map((_, index) => (
+                      <button
+                        key={index}
+                        onClick={() => handleDownload(index)}
+                        disabled={converting}
+                        className="flex items-center gap-2 rounded-xl bg-emerald-500 px-4 py-2.5 font-semibold text-white shadow-lg shadow-emerald-500/25 transition-all hover:bg-emerald-600 disabled:opacity-60"
+                      >
+                        <Download className="h-4 w-4" />
+                        PDF {index + 1}
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => handleDownloadAll()}
+                      disabled={converting}
+                      className="flex items-center gap-2 rounded-xl bg-slate-600 px-4 py-2.5 font-semibold text-white shadow-lg transition-all hover:bg-slate-700 disabled:opacity-60"
+                    >
+                      <Download className="h-4 w-4" />
+                      Download All as ZIP
+                    </button>
+                  </>
+                )}
               </div>
             </div>
           )}

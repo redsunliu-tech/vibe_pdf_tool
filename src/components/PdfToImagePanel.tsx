@@ -5,9 +5,11 @@ import {
   convertPdfToImages,
   downloadBlob,
   formatBytes,
+  renderPdfPageToBlob,
   type ImageFormat,
   type PdfPageResult,
 } from '../lib/pdfToImage';
+import { downloadAsZip } from '../lib/zipUtils';
 
 const FORMAT_OPTIONS: { value: ImageFormat; label: string }[] = [
   { value: 'png', label: 'PNG' },
@@ -37,6 +39,7 @@ export function PdfToImagePanel() {
   const fileRef = useRef<File | null>(null);
   const previewUrlsRef = useRef<string[]>([]);
   const conversionRequestRef = useRef(0);
+  const fullResCache = useRef<Map<number, Blob>>(new Map()); // Cache for full-res images
 
   const syncPreviewUrls = useCallback((nextResults: PdfPageResult[]) => {
     const nextUrls = nextResults.map((page) => page.previewUrl);
@@ -50,7 +53,26 @@ export function PdfToImagePanel() {
     return () => {
       previewUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
       previewUrlsRef.current = [];
+      fullResCache.current.clear();
     };
+  }, [syncPreviewUrls]);
+
+  useEffect(() => {
+    const handleClearAll = () => {
+      // Clear all resources when "Clear All Resources" is clicked
+      fullResCache.current.clear();
+      syncPreviewUrls([]);
+      setFile(null);
+      setResults([]);
+      setError(null);
+      setProgress(0);
+    };
+
+    // Listen for the global cleanup event
+    window.addEventListener('pdf-tool:clear-all', handleClearAll);
+    
+    // Cleanup the event listener when component unmounts
+    return () => window.removeEventListener('pdf-tool:clear-all', handleClearAll);
   }, [syncPreviewUrls]);
 
   const handleFiles = useCallback((files: File[]) => {
@@ -63,6 +85,7 @@ export function PdfToImagePanel() {
     setResults([]);
     setError(null);
     setProgress(0);
+    fullResCache.current.clear();
   }, []);
 
   const handleConvert = useCallback(async () => {
@@ -73,6 +96,8 @@ export function PdfToImagePanel() {
     setProgress(0);
     setResults([]);
     fileRef.current = file;
+    fullResCache.current.clear();
+    
     try {
       const pages = await convertPdfToImages(file, {
         format,
@@ -81,10 +106,12 @@ export function PdfToImagePanel() {
         quality,
         onProgress: (current, total) => setProgress(Math.round((current / total) * 100)),
       });
+      
       if (requestId !== conversionRequestRef.current) {
         pages.forEach((page) => URL.revokeObjectURL(page.previewUrl));
         return;
       }
+      
       syncPreviewUrls(pages);
       setResults(pages);
     } catch (err) {
@@ -98,17 +125,77 @@ export function PdfToImagePanel() {
     }
   }, [file, format, minResolution, quality]);
 
-  const handleDownloadOne = (page: PdfPageResult) => {
-    const base = file?.name.replace(/\.pdf$/i, '') ?? 'page';
-    downloadBlob(page.blob, `${base}_page_${page.pageNumber}.${format}`);
-  };
+  const handleDownloadOne = useCallback(async (page: PdfPageResult) => {
+    if (!file) return;
+    
+    setConverting(true);
+    const base = file.name.replace(/\.pdf$/i, '') ?? 'page';
+    
+    try {
+      // Check cache first
+      let blob = fullResCache.current.get(page.pageNumber);
+      
+      if (!blob) {
+        // Generate full-res image
+        blob = await renderPdfPageToBlob(file, page.pageNumber, {
+          format,
+          minScale: 1,
+          minResolution: { width: minResolution, height: Math.round((minResolution / 16) * 9) },
+          quality,
+        });
+        fullResCache.current.set(page.pageNumber, blob);
+      }
+      
+      downloadBlob(blob, `${base}_page_${page.pageNumber}.${format}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Download failed');
+    } finally {
+      setConverting(false);
+    }
+  }, [file, format, minResolution, quality]);
 
-  const handleDownloadAll = () => {
-    const base = file?.name.replace(/\.pdf$/i, '') ?? 'page';
-    results.forEach((page, i) => {
-      setTimeout(() => downloadBlob(page.blob, `${base}_page_${page.pageNumber}.${format}`), i * 200);
-    });
-  };
+  const handleDownloadAll = useCallback(async () => {
+    if (!file) return;
+    
+    setConverting(true);
+    const base = file.name.replace(/\.pdf$/i, '') ?? 'converted';
+    
+    try {
+      const zipFiles: { blob: Blob; filename: string }[] = [];
+      
+      // Generate all full-res images
+      for (let i = 0; i < results.length; i++) {
+        const page = results[i];
+        
+        // Check cache first
+        let blob = fullResCache.current.get(page.pageNumber);
+        
+        if (!blob) {
+          blob = await renderPdfPageToBlob(file, page.pageNumber, {
+            format,
+            minScale: 1,
+            minResolution: { width: minResolution, height: Math.round((minResolution / 16) * 9) },
+            quality,
+          });
+          fullResCache.current.set(page.pageNumber, blob);
+        }
+        
+        zipFiles.push({
+          blob,
+          filename: `${base}_page_${page.pageNumber}.${format}`,
+        });
+        
+        setProgress(Math.round(((i + 1) / results.length) * 100));
+      }
+      
+      // Download as ZIP
+      await downloadAsZip(zipFiles, base);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Download failed');
+    } finally {
+      setConverting(false);
+    }
+  }, [file, format, minResolution, quality, results]);
 
   const handleReset = () => {
     conversionRequestRef.current += 1;
@@ -117,6 +204,7 @@ export function PdfToImagePanel() {
     setResults([]);
     setError(null);
     setProgress(0);
+    fullResCache.current.clear();
   };
 
   return (
@@ -262,7 +350,7 @@ export function PdfToImagePanel() {
                   className="flex items-center gap-2 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-emerald-600"
                 >
                   <Download className="h-4 w-4" />
-                  Download All
+                  Download All as ZIP
                 </button>
               </div>
 
@@ -287,7 +375,7 @@ export function PdfToImagePanel() {
                     </div>
                     <div className="flex items-center justify-between px-3 py-2">
                       <span className="text-sm font-medium text-slate-600">Page {page.pageNumber}</span>
-                      <span className="text-xs text-slate-400">{formatBytes(page.blob.size)}</span>
+                      <span className="text-xs text-slate-400">Preview ready</span>
                     </div>
                   </div>
                 ))}

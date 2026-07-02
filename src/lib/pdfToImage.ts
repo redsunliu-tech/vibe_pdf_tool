@@ -7,7 +7,7 @@ export type ImageFormat = 'png' | 'jpg' | 'bmp' | 'webp';
 
 export interface PdfPageResult {
   pageNumber: number;
-  blob: Blob;
+  blob?: Blob;
   previewUrl: string;
   width: number;
   height: number;
@@ -71,34 +71,30 @@ export async function convertPdfToImages(
     const page = await pdf.getPage(i);
     const baseViewport = page.getViewport({ scale: 1 });
 
-    // Compute the scale needed so the output meets the minimum resolution.
-    // We guarantee both dimensions are >= the requested minimum by taking the
-    // larger of the two per-dimension scale requirements.
-    const scaleX = options.minResolution.width / baseViewport.width;
-    const scaleY = options.minResolution.height / baseViewport.height;
+    // For previews, use a lower resolution
+    const scaleX = Math.min(options.minResolution.width, 150) / baseViewport.width;
+    const scaleY = Math.min(options.minResolution.height, 200) / baseViewport.height;
     const resolutionScale = Math.max(scaleX, scaleY, 1);
     const scale = Math.max(options.minScale, resolutionScale);
 
     const viewport = page.getViewport({ scale });
-
     const canvas = document.createElement('canvas');
     const context = canvas.getContext('2d');
     if (!context) throw new Error('Failed to get canvas context');
+    
     canvas.width = Math.floor(viewport.width);
     canvas.height = Math.floor(viewport.height);
-
-    // White background so transparent PDFs don't render black on JPG/BMP.
     context.fillStyle = '#ffffff';
     context.fillRect(0, 0, canvas.width, canvas.height);
 
     await page.render({ canvas, canvasContext: context, viewport }).promise;
-
-    const blob = await canvasToFormatBlob(canvas, options.format, options.quality);
-    const previewUrl = URL.createObjectURL(blob);
+    
+    // Create low-res preview
+    const previewBlob = await createPreviewBlob(canvas);
+    const previewUrl = URL.createObjectURL(previewBlob);
 
     results.push({
       pageNumber: i,
-      blob,
       previewUrl,
       width: canvas.width,
       height: canvas.height,
@@ -106,6 +102,8 @@ export async function convertPdfToImages(
 
     options.onProgress?.(i, total);
     page.cleanup();
+    canvas.width = 0;
+    canvas.height = 0;
   }
 
   await loadingTask.destroy();
@@ -129,4 +127,73 @@ export function formatBytes(bytes: number): string {
   const sizes = ['B', 'KB', 'MB', 'GB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
+}
+
+function createPreviewBlob(canvas: HTMLCanvasElement): Promise<Blob> {
+  const maxDim = 150; // Max preview dimension
+  const scale = Math.min(1, maxDim / Math.max(canvas.width, canvas.height));
+  
+  if (scale >= 1) {
+    return canvasToFormatBlob(canvas, 'jpg', 0.8);
+  }
+  
+  const previewCanvas = document.createElement('canvas');
+  previewCanvas.width = Math.round(canvas.width * scale);
+  previewCanvas.height = Math.round(canvas.height * scale);
+  
+  const ctx = previewCanvas.getContext('2d');
+  if (!ctx) return canvasToFormatBlob(canvas, 'jpg', 0.8);
+  
+  ctx.drawImage(canvas, 0, 0, previewCanvas.width, previewCanvas.height);
+  const blob = canvasToFormatBlob(previewCanvas, 'jpg', 0.8);
+  
+  // Cleanup
+  previewCanvas.width = 0;
+  previewCanvas.height = 0;
+  
+  return blob;
+}
+
+export async function renderPdfPageToBlob(
+  file: File,
+  pageNumber: number,
+  options: PdfConvertOptions,
+): Promise<Blob> {
+  const arrayBuffer = await file.arrayBuffer();
+  const loadingTask = pdfjsLib.getDocument({
+    data: arrayBuffer,
+    disableAutoFetch: true,
+    disableStream: true,
+    disableRange: true,
+  });
+  
+  const pdf = await loadingTask.promise;
+  const page = await pdf.getPage(pageNumber);
+  const baseViewport = page.getViewport({ scale: 1 });
+
+  const scaleX = options.minResolution.width / baseViewport.width;
+  const scaleY = options.minResolution.height / baseViewport.height;
+  const resolutionScale = Math.max(scaleX, scaleY, 1);
+  const scale = Math.max(options.minScale, resolutionScale);
+
+  const viewport = page.getViewport({ scale });
+  const canvas = document.createElement('canvas');
+  const context = canvas.getContext('2d');
+  
+  if (!context) throw new Error('Failed to get canvas context');
+  
+  canvas.width = Math.floor(viewport.width);
+  canvas.height = Math.floor(viewport.height);
+  context.fillStyle = '#ffffff';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+
+  await page.render({ canvas, canvasContext: context, viewport }).promise;
+  const blob = await canvasToFormatBlob(canvas, options.format, options.quality);
+  
+  page.cleanup();
+  canvas.width = 0;
+  canvas.height = 0;
+  await loadingTask.destroy();
+  
+  return blob;
 }
