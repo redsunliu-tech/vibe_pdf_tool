@@ -31,10 +31,11 @@ const PAGE_SIZES: Record<Exclude<PageSize, 'fit'>, Dimensions> = {
   a3: { w: 297, h: 420 },
 };
 
-function getFormat(file: File): 'PNG' | 'JPEG' | 'WEBP' {
+function getFormat(file: File): 'PNG' | 'JPEG' | 'WEBP' | 'AVIF' {
   const type = file.type.toLowerCase();
   if (type.includes('png')) return 'PNG';
   if (type.includes('webp')) return 'WEBP';
+  if (type.includes('avif')) return 'AVIF';
   return 'JPEG';
 }
 
@@ -47,24 +48,39 @@ function loadImage(dataUrl: string): Promise<HTMLImageElement> {
   });
 }
 
-async function createPdfForImage(image: ImageInput, options: Omit<ImageConvertOptions, 'outputMode' | 'onProgress'>) {
-  const img = await loadImage(image.dataUrl);
-  const format = getFormat(image.file);
-  const imgRatio = img.width / img.height;
+interface PageLayout {
+  width: number;
+  height: number;
+  format: number[] | Exclude<PageSize, 'fit'>;
+  orientation: 'portrait' | 'landscape';
+  margin: number;
+  drawX: number;
+  drawY: number;
+  drawW: number;
+  drawH: number;
+}
 
+export function calculatePageLayout(
+  pageSize: PageSize,
+  orientation: Orientation,
+  margin: number,
+  imgWidth: number,
+  imgHeight: number
+): PageLayout {
+  const imgRatio = imgWidth / imgHeight;
   let pageW: number;
   let pageH: number;
 
-  if (options.pageSize === 'fit') {
-    pageW = img.width * 0.264583;
-    pageH = img.height * 0.264583;
+  if (pageSize === 'fit') {
+    pageW = imgWidth * 0.264583;
+    pageH = imgHeight * 0.264583;
   } else {
-    const base = PAGE_SIZES[options.pageSize];
-    if (options.orientation === 'auto') {
+    const base = PAGE_SIZES[pageSize];
+    if (orientation === 'auto') {
       const useLandscape = imgRatio > 1;
       pageW = useLandscape ? base.h : base.w;
       pageH = useLandscape ? base.w : base.h;
-    } else if (options.orientation === 'landscape') {
+    } else if (orientation === 'landscape') {
       pageW = base.h;
       pageH = base.w;
     } else {
@@ -73,15 +89,12 @@ async function createPdfForImage(image: ImageInput, options: Omit<ImageConvertOp
     }
   }
 
-  const pdf = new jsPDF({
-    orientation: pageW > pageH ? 'landscape' : 'portrait',
-    unit: 'mm',
-    format: options.pageSize === 'fit' ? [pageW, pageH] : options.pageSize,
-  });
+  const pageOrientation = pageW > pageH ? 'landscape' : 'portrait';
+  const pageFormat = pageSize === 'fit' ? [pageW, pageH] : pageSize;
+  const pageMargin = pageSize === 'fit' ? 0 : margin;
 
-  const margin = options.pageSize === 'fit' ? 0 : options.margin;
-  const availW = pageW - margin * 2;
-  const availH = pageH - margin * 2;
+  const availW = pageW - pageMargin * 2;
+  const availH = pageH - pageMargin * 2;
 
   let drawW = availW;
   let drawH = drawW / imgRatio;
@@ -93,7 +106,42 @@ async function createPdfForImage(image: ImageInput, options: Omit<ImageConvertOp
   const x = (pageW - drawW) / 2;
   const y = (pageH - drawH) / 2;
 
-  pdf.addImage(image.dataUrl, format, x, y, drawW, drawH, undefined, 'FAST');
+  return {
+    width: pageW,
+    height: pageH,
+    format: pageFormat,
+    orientation: pageOrientation,
+    margin: pageMargin,
+    drawX: x,
+    drawY: y,
+    drawW,
+    drawH,
+  };
+}
+
+function convertImageToPng(img: HTMLImageElement): string {
+  const canvas = document.createElement('canvas');
+  canvas.width = img.width;
+  canvas.height = img.height;
+  const ctx = canvas.getContext('2d');
+  ctx?.drawImage(img, 0, 0);
+  return canvas.toDataURL('image/png');
+}
+
+async function createPdfForImage(image: ImageInput, options: Omit<ImageConvertOptions, 'outputMode' | 'onProgress'>) {
+  const img = await loadImage(image.dataUrl);
+  const format = getFormat(image.file);
+  const layout = calculatePageLayout(options.pageSize, options.orientation, options.margin, img.width, img.height);
+
+  const pdf = new jsPDF({
+    orientation: layout.orientation,
+    unit: 'mm',
+    format: layout.format,
+  });
+
+  const useDataUrl = format === 'AVIF' ? convertImageToPng(img) : image.dataUrl;
+  const useFormat = format === 'AVIF' ? 'PNG' : format;
+  pdf.addImage(useDataUrl, useFormat, layout.drawX, layout.drawY, layout.drawW, layout.drawH, undefined, 'FAST');
   return pdf;
 }
 
@@ -124,57 +172,22 @@ export async function convertImagesToPdf(
   for (let i = 0; i < total; i++) {
     const image = images[i];
     const img = await loadImage(image.dataUrl);
-    const imgRatio = img.width / img.height;
-
-    let pageW: number;
-    let pageH: number;
-
-    if (options.pageSize === 'fit') {
-      pageW = img.width * 0.264583;
-      pageH = img.height * 0.264583;
-    } else {
-      const base = PAGE_SIZES[options.pageSize];
-      if (options.orientation === 'auto') {
-        const useLandscape = imgRatio > 1;
-        pageW = useLandscape ? base.h : base.w;
-        pageH = useLandscape ? base.w : base.h;
-      } else if (options.orientation === 'landscape') {
-        pageW = base.h;
-        pageH = base.w;
-      } else {
-        pageW = base.w;
-        pageH = base.h;
-      }
-    }
-
-    const pageFormat = options.pageSize === 'fit' ? [pageW, pageH] : options.pageSize;
-    const pageOrientation = pageW > pageH ? 'landscape' : 'portrait';
+    const layout = calculatePageLayout(options.pageSize, options.orientation, options.margin, img.width, img.height);
 
     if (pdf === null) {
       pdf = new jsPDF({
-        orientation: pageOrientation,
+        orientation: layout.orientation,
         unit: 'mm',
-        format: pageFormat,
+        format: layout.format,
       });
     } else {
-      pdf.addPage(pageFormat, pageOrientation);
+      pdf.addPage(layout.format, layout.orientation);
     }
 
-    const margin = options.pageSize === 'fit' ? 0 : options.margin;
-    const availW = pageW - margin * 2;
-    const availH = pageH - margin * 2;
-
-    let drawW = availW;
-    let drawH = drawW / imgRatio;
-    if (drawH > availH) {
-      drawH = availH;
-      drawW = drawH * imgRatio;
-    }
-
-    const x = (pageW - drawW) / 2;
-    const y = (pageH - drawH) / 2;
-
-    pdf.addImage(image.dataUrl, getFormat(image.file), x, y, drawW, drawH, undefined, 'FAST');
+    const format = getFormat(image.file);
+    const useDataUrl = format === 'AVIF' ? convertImageToPng(img) : image.dataUrl;
+    const useFormat = format === 'AVIF' ? 'PNG' : format;
+    pdf.addImage(useDataUrl, useFormat, layout.drawX, layout.drawY, layout.drawW, layout.drawH, undefined, 'FAST');
     options.onProgress?.(i + 1, total);
   }
 

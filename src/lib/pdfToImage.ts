@@ -3,7 +3,7 @@ import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
-export type ImageFormat = 'png' | 'jpg' | 'bmp' | 'webp';
+export type ImageFormat = 'png' | 'jpg' | 'avif' | 'webp';
 
 export interface PdfPageResult {
   pageNumber: number;
@@ -24,7 +24,7 @@ export interface PdfConvertOptions {
 const MIME_TYPES: Record<ImageFormat, string> = {
   png: 'image/png',
   jpg: 'image/jpeg',
-  bmp: 'image/bmp',
+  avif: 'image/avif',
   webp: 'image/webp',
 };
 
@@ -41,19 +41,11 @@ function canvasToBlob(canvas: HTMLCanvasElement, format: ImageFormat, quality: n
   });
 }
 
-// Browser canvas.toBlob doesn't support BMP natively; fall back to PNG with a note.
-// We keep the extension but encode as PNG when the browser lacks BMP support.
 async function canvasToFormatBlob(
   canvas: HTMLCanvasElement,
   format: ImageFormat,
   quality: number,
 ): Promise<Blob> {
-  if (format === 'bmp') {
-    // Try BMP first; most browsers return null, so fall back to PNG encoding.
-    const bmpBlob = await canvasToBlob(canvas, 'bmp', quality).catch(() => null);
-    if (bmpBlob && bmpBlob.size > 0 && bmpBlob.type === 'image/bmp') return bmpBlob;
-    return canvasToBlob(canvas, 'png', quality);
-  }
   return canvasToBlob(canvas, format, quality);
 }
 
@@ -71,33 +63,33 @@ export async function convertPdfToImages(
     const page = await pdf.getPage(i);
     const baseViewport = page.getViewport({ scale: 1 });
 
-    // For previews, use a lower resolution
-    const scaleX = Math.min(options.minResolution.width, 150) / baseViewport.width;
-    const scaleY = Math.min(options.minResolution.height, 200) / baseViewport.height;
-    const resolutionScale = Math.max(scaleX, scaleY, 1);
-    const scale = Math.max(options.minScale, resolutionScale);
-
-    const viewport = page.getViewport({ scale });
+    const previewMaxDim = 150;
+    const previewScale = Math.min(1, previewMaxDim / Math.max(baseViewport.width, baseViewport.height));
+    const previewViewport = page.getViewport({ scale: previewScale });
+    
     const canvas = document.createElement('canvas');
     const context = canvas.getContext('2d');
     if (!context) throw new Error('Failed to get canvas context');
     
-    canvas.width = Math.floor(viewport.width);
-    canvas.height = Math.floor(viewport.height);
+    canvas.width = Math.floor(previewViewport.width);
+    canvas.height = Math.floor(previewViewport.height);
     context.fillStyle = '#ffffff';
     context.fillRect(0, 0, canvas.width, canvas.height);
 
-    await page.render({ canvas, canvasContext: context, viewport }).promise;
+    await page.render({ canvas, canvasContext: context, viewport: previewViewport }).promise;
     
-    // Create low-res preview
-    const previewBlob = await createPreviewBlob(canvas);
+    const previewBlob = await canvasToFormatBlob(canvas, 'jpg', 0.8);
     const previewUrl = URL.createObjectURL(previewBlob);
+
+    const fullScaleX = options.minResolution.width / baseViewport.width;
+    const fullScaleY = options.minResolution.height / baseViewport.height;
+    const fullResolutionScale = Math.max(fullScaleX, fullScaleY, options.minScale);
 
     results.push({
       pageNumber: i,
       previewUrl,
-      width: canvas.width,
-      height: canvas.height,
+      width: Math.floor(baseViewport.width * fullResolutionScale),
+      height: Math.floor(baseViewport.height * fullResolutionScale),
     });
 
     options.onProgress?.(i, total);
@@ -127,31 +119,6 @@ export function formatBytes(bytes: number): string {
   const sizes = ['B', 'KB', 'MB', 'GB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
-}
-
-function createPreviewBlob(canvas: HTMLCanvasElement): Promise<Blob> {
-  const maxDim = 150; // Max preview dimension
-  const scale = Math.min(1, maxDim / Math.max(canvas.width, canvas.height));
-  
-  if (scale >= 1) {
-    return canvasToFormatBlob(canvas, 'jpg', 0.8);
-  }
-  
-  const previewCanvas = document.createElement('canvas');
-  previewCanvas.width = Math.round(canvas.width * scale);
-  previewCanvas.height = Math.round(canvas.height * scale);
-  
-  const ctx = previewCanvas.getContext('2d');
-  if (!ctx) return canvasToFormatBlob(canvas, 'jpg', 0.8);
-  
-  ctx.drawImage(canvas, 0, 0, previewCanvas.width, previewCanvas.height);
-  const blob = canvasToFormatBlob(previewCanvas, 'jpg', 0.8);
-  
-  // Cleanup
-  previewCanvas.width = 0;
-  previewCanvas.height = 0;
-  
-  return blob;
 }
 
 export async function renderPdfPageToBlob(

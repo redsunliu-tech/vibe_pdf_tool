@@ -14,7 +14,7 @@ import { downloadAsZip } from '../lib/zipUtils';
 const FORMAT_OPTIONS: { value: ImageFormat; label: string }[] = [
   { value: 'png', label: 'PNG' },
   { value: 'jpg', label: 'JPG' },
-  { value: 'bmp', label: 'BMP' },
+  { value: 'avif', label: 'AVIF' },
   { value: 'webp', label: 'WebP' },
 ];
 

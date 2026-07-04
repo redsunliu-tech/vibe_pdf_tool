@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Image as ImageIcon, Download, Trash2, Loader2, Settings2, FileStack, CheckCircle2, GripVertical, X } from 'lucide-react';
+import { Image as ImageIcon, Download, Trash2, Loader2, Settings2, FileStack, GripVertical, X } from 'lucide-react';
 import { Dropzone } from './Dropzone';
 import {
   convertImagesToPdf,
+  calculatePageLayout,
   getImageDimensions,
   type ImageInput,
   type Orientation,
@@ -30,6 +31,18 @@ const OUTPUT_MODE_OPTIONS: { value: PdfOutputMode; label: string; description: s
 ];
 
 export function ImageToPdfPanel() {
+  interface PdfPreviewResult {
+    index: number;
+    previewUrl: string;
+    pageWidth: number;
+    pageHeight: number;
+    imageWidth: number;
+    imageHeight: number;
+    fileName: string;
+    pageSize: PageSize;
+    orientation: 'portrait' | 'landscape';
+  }
+
   const [images, setImages] = useState<ImageInput[]>([]);
   const [pageSize, setPageSize] = useState<PageSize>('a4');
   const [orientation, setOrientation] = useState<Orientation>('auto');
@@ -37,13 +50,27 @@ export function ImageToPdfPanel() {
   const [outputMode, setOutputMode] = useState<PdfOutputMode>('single');
   const [converting, setConverting] = useState(false);
   const [progress, setProgress] = useState(0);
-  //const [resultBlobs, setResultBlobs] = useState<Blob[]>([]);
+  const [results, setResults] = useState<PdfPreviewResult[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [loading, setLoading] = useState(false);
   const previewUrlsRef = useRef<string[]>([]);
   const fileReadRequestRef = useRef(0);
-  const pdfCache = useRef<Map<number, Blob>>(new Map()); // Cache for generated PDFs
+  const conversionRequestRef = useRef(0);
+  const pdfCache = useRef<Map<number, Blob>>(new Map());
+  const resultsRef = useRef<PdfPreviewResult[]>([]);
+
+  function dataUrlToBlob(dataUrl: string): Blob {
+    const parts = dataUrl.split(',');
+    const mime = parts[0].match(/:(.*?);/)![1];
+    const bstr = atob(parts[1]);
+    let n = bstr.length;
+    const u8arr = new Uint8Array(n);
+    while (n--) {
+      u8arr[n] = bstr.charCodeAt(n);
+    }
+    return new Blob([u8arr], { type: mime });
+  }
 
   const syncPreviewUrls = useCallback((nextImages: ImageInput[]) => {
     const nextUrls = nextImages.map((img) => img.previewUrl);
@@ -53,32 +80,92 @@ export function ImageToPdfPanel() {
     previewUrlsRef.current = nextUrls;
   }, []);
 
+  const clearResults = useCallback(() => {
+    resultsRef.current.forEach((r) => URL.revokeObjectURL(r.previewUrl));
+    resultsRef.current = [];
+    setResults([]);
+    setProgress(0);
+    pdfCache.current.clear();
+  }, []);
+
+  useEffect(() => {
+    resultsRef.current = results;
+  }, [results]);
+
+  const generatePreview = useCallback(async (image: ImageInput, index: number): Promise<PdfPreviewResult> => {
+    const layout = calculatePageLayout(pageSize, orientation, margin, image.width, image.height);
+    
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const imgEl = new Image();
+      imgEl.onload = () => resolve(imgEl);
+      imgEl.onerror = () => reject(new Error('Failed to load image'));
+      imgEl.src = image.dataUrl;
+    });
+
+    const previewMaxDim = 150;
+    const scale = Math.min(1, previewMaxDim / Math.max(layout.width, layout.height));
+    const canvasWidth = Math.floor(layout.width * scale);
+    const canvasHeight = Math.floor(layout.height * scale);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
+    const ctx = canvas.getContext('2d');
+    
+    ctx!.fillStyle = '#ffffff';
+    ctx!.fillRect(0, 0, canvasWidth, canvasHeight);
+    
+    const drawScale = Math.min(1, (canvasWidth - (layout.margin * scale * 2)) / img.width);
+    const drawW = img.width * drawScale;
+    const drawH = img.height * drawScale;
+    const drawX = (canvasWidth - drawW) / 2;
+    const drawY = (canvasHeight - drawH) / 2;
+    
+    ctx!.drawImage(img, drawX, drawY, drawW, drawH);
+    
+    const dataUrl = canvas.toDataURL('image/png');
+    const previewUrl = URL.createObjectURL(dataUrlToBlob(dataUrl));
+    
+    const baseName = image.file.name.replace(/\.[^.]+$/, '');
+    const fileName = `${baseName}.pdf`;
+
+    return {
+      index,
+      previewUrl,
+      pageWidth: layout.width,
+      pageHeight: layout.height,
+      imageWidth: image.width,
+      imageHeight: image.height,
+      fileName,
+      pageSize,
+      orientation: layout.orientation,
+    };
+  }, [pageSize, orientation, margin]);
+
   useEffect(() => {
     return () => {
       previewUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
       previewUrlsRef.current = [];
+      resultsRef.current.forEach((r) => URL.revokeObjectURL(r.previewUrl));
     };
   }, [syncPreviewUrls]);
 
   useEffect(() => {
     const handleClearAll = () => {
-      // Clear all state and resources
       setImages([]);
       setConverting(false);
       setError(null);
       setProgress(0);
-      pdfCache.current.clear(); 
-      // Clear any blob URLs if you have them
-      images.forEach(img => {
-        if (img.previewUrl) {
-          URL.revokeObjectURL(img.previewUrl);
-        }
-      });
+      clearResults();
     };
 
     window.addEventListener('pdf-tool:clear-all', handleClearAll);
     return () => window.removeEventListener('pdf-tool:clear-all', handleClearAll);
-  }, [images]);
+  }, []);
+
+  useEffect(() => {
+    clearResults();
+  }, [pageSize, orientation, margin, outputMode]);
 
   const handleFiles = useCallback(async (files: File[]) => {
     const valid = files.filter((f) => f.type.startsWith('image/'));
@@ -86,7 +173,7 @@ export function ImageToPdfPanel() {
       setError('Please select valid image files (PNG, JPG, BMP, WebP).');
       return;
     }
-    setProgress(0); // ✅ Add this line to hide results panel
+    clearResults();
     const requestId = ++fileReadRequestRef.current;
     setError(null);
     setLoading(true);
@@ -111,7 +198,6 @@ export function ImageToPdfPanel() {
         syncPreviewUrls(next);
         return next;
       });
-    //  setResultBlobs([]);
     } catch {
       if (requestId === fileReadRequestRef.current) {
         setError('Failed to read one or more images.');
@@ -121,20 +207,20 @@ export function ImageToPdfPanel() {
         setLoading(false);
       }
     }
-  }, []);
+  }, [syncPreviewUrls, clearResults]);
 
   const handleRemove = (index: number) => {
     fileReadRequestRef.current += 1;
+    clearResults();
     setImages((prev) => {
       const next = prev.filter((_, i) => i !== index);
       syncPreviewUrls(next);
       return next;
     });
-    setProgress(0); // ✅ Add this line to hide results panel
-  //  setResultBlobs([]);
   };
 
   const handleMove = (index: number, dir: -1 | 1) => {
+    clearResults();
     setImages((prev) => {
       const next = [...prev];
       const target = index + dir;
@@ -142,54 +228,84 @@ export function ImageToPdfPanel() {
       [next[index], next[target]] = [next[target], next[index]];
       return next;
     });
-  //  setResultBlobs([]);
   };
 
   const handleClear = () => {
     fileReadRequestRef.current += 1;
+    clearResults();
     setImages(() => {
       syncPreviewUrls([]);
       return [];
     });
-  //  setResultBlobs([]);
-    pdfCache.current.clear();
     setError(null);
-    setProgress(0);
   };
 
-  const handleConvert = useCallback(() => {
+  const handleConvert = useCallback(async () => {
     if (!images.length) return;
-    setConverting(false);
+    
+    const requestId = ++conversionRequestRef.current;
+    setConverting(true);
     setError(null);
-    setProgress(100); // Show completion state without generating PDFs
-    // PDFs will be generated on-demand when user clicks download
-  }, [images]);
+    clearResults();
+    
+    try {
+      const previews: PdfPreviewResult[] = [];
+      
+      for (let i = 0; i < images.length; i++) {
+        const preview = await generatePreview(images[i], i);
+        previews.push(preview);
+        setProgress(Math.round(((i + 1) / images.length) * 100));
+        
+        if (requestId !== conversionRequestRef.current) {
+          previews.forEach((p) => URL.revokeObjectURL(p.previewUrl));
+          return;
+        }
+      }
+      
+      if (requestId === conversionRequestRef.current) {
+        setResults(previews);
+      }
+    } catch (err) {
+      if (requestId === conversionRequestRef.current) {
+        setError(err instanceof Error ? err.message : 'Preview generation failed');
+      }
+    } finally {
+      if (requestId === conversionRequestRef.current) {
+        setConverting(false);
+      }
+    }
+  }, [images, generatePreview]);
 
   const generatePdf = useCallback(async (index?: number): Promise<Blob[]> => {
     setConverting(true);
     
     try {
-      // Determine output mode for this generation
-      const generationMode = index !== undefined ? 'multiple' : outputMode;
+      if (index !== undefined) {
+        const blobs = await convertImagesToPdf([images[index]], {
+          pageSize,
+          orientation,
+          margin,
+          outputMode: 'multiple',
+          onProgress: (current) => setProgress(Math.round((current / images.length) * 100)),
+        });
+        const result = Array.isArray(blobs) ? blobs : [blobs];
+        pdfCache.current.set(index, result[0]);
+        return result;
+      }
       
       const blobs = await convertImagesToPdf(images, {
         pageSize,
         orientation,
         margin,
-        outputMode: generationMode,
+        outputMode,
         onProgress: (current, total) => setProgress(Math.round((current / total) * 100)),
       });
       
       const result = Array.isArray(blobs) ? blobs : [blobs];
       
-      // Cache the generated PDFs
-      if (generationMode === 'single') {
+      if (outputMode === 'single') {
         pdfCache.current.set(0, result[0]);
-      } else if (index !== undefined) {
-        // For individual page generation in multiple mode
-        pdfCache.current.set(index, result[0]);
       } else {
-        // For all pages in multiple mode
         result.forEach((blob, i) => {
           pdfCache.current.set(i, blob);
         });
@@ -206,8 +322,8 @@ export function ImageToPdfPanel() {
     
     try {
       let blobs: Blob[];
+      let fileName: string;
       
-      // Check cache first
       if (outputMode === 'single') {
         const cached = pdfCache.current.get(0);
         if (cached) {
@@ -215,6 +331,7 @@ export function ImageToPdfPanel() {
         } else {
           blobs = await generatePdf();
         }
+        fileName = results.length > 0 ? `${images[0].file.name.replace(/\.[^.]+$/, '')}_merged.pdf` : 'converted.pdf';
       } else {
         const cacheKey = index ?? 0;
         const cached = pdfCache.current.get(cacheKey);
@@ -223,66 +340,60 @@ export function ImageToPdfPanel() {
         } else {
           blobs = await generatePdf(index);
         }
+        const result = results.find((r) => r.index === cacheKey);
+        fileName = result?.fileName || `converted-${cacheKey + 1}.pdf`;
       }
-      
-      // Download the PDF
-      const fileName = outputMode === 'single' 
-        ? 'converted.pdf' 
-        : `converted-${(index ?? 0) + 1}.pdf`;
       
       downloadBlob(blobs[0], fileName);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Download failed');
     }
-  }, [images, outputMode, generatePdf]);
+  }, [images, outputMode, generatePdf, results]);
 
-  // Add this new function after handleDownload
   const handleDownloadAll = useCallback(async () => {
     if (!images.length || outputMode !== 'multiple') return;
     
     setConverting(true);
     
     try {
-      // Dynamically import zipUtils only when needed
       const { downloadAsZip } = await import('../lib/zipUtils');
       
       const zipFiles: { blob: Blob; filename: string }[] = [];
       
-      // Generate all PDFs (checking cache first)
       for (let i = 0; i < images.length; i++) {
         const cached = pdfCache.current.get(i);
+        const result = results.find((r) => r.index === i);
+        const fileName = result?.fileName || `${images[i].file.name.replace(/\.[^.]+$/, '')}.pdf`;
         
         if (cached) {
-          zipFiles.push({ blob: cached, filename: `converted-${i + 1}.pdf` });
+          zipFiles.push({ blob: cached, filename: fileName });
         } else {
           const blobs = await generatePdf(i);
           if (blobs.length > 0) {
-            zipFiles.push({ blob: blobs[0], filename: `converted-${i + 1}.pdf` });
+            zipFiles.push({ blob: blobs[0], filename: fileName });
           }
         }
         
         setProgress(Math.round(((i + 1) / images.length) * 100));
       }
       
-      // Download as ZIP
-      await downloadAsZip(zipFiles, 'converted');
+      await downloadAsZip(zipFiles, 'converted_pdfs');
       
-      // Clear cache after full download to free memory
       pdfCache.current.clear();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Download failed');
     } finally {
       setConverting(false);
     }
-  }, [images, outputMode, generatePdf]);
+  }, [images, outputMode, generatePdf, results]);
 
   return (
     <div className="space-y-6">
       {images.length === 0 && (
         <Dropzone
-          accept="image/png,image/jpeg,image/bmp,image/webp,.png,.jpg,.jpeg,.bmp,.webp"
-          title="Drop images here"
-          subtitle="or click to browse — PNG, JPG, BMP, WebP supported"
+          accept="image/png,image/jpeg,image/bmp,image/webp,image/avif,.png,.jpg,.jpeg,.bmp,.webp,.avif"
+                title="Drop images here"
+                subtitle="or click to browse — PNG, JPG, BMP, WebP, AVIF supported"
           icon={<ImageIcon className="h-8 w-8" />}
           onFiles={handleFiles}
         />
@@ -474,25 +585,7 @@ export function ImageToPdfPanel() {
             )}
           </div>
 
-          {/* Convert button */}
-          <button
-            onClick={handleConvert}
-            disabled={converting}
-            className="flex w-full items-center justify-center gap-2 rounded-xl bg-sky-500 py-3.5 font-semibold text-white shadow-lg shadow-sky-500/25 transition-all hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {converting ? (
-              <>
-                <Loader2 className="h-5 w-5 animate-spin" />
-                Converting... {progress}%
-              </>
-            ) : (
-              <>
-                <FileStack className="h-5 w-5" />
-                {outputMode === 'single' ? 'Prepare PDF' : 'Prepare PDFs'}
-              </>
-            )}
-          </button>
-
+          {/* Progress bar during conversion */}
           {converting && (
             <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
               <div
@@ -508,53 +601,116 @@ export function ImageToPdfPanel() {
             </div>
           )}
 
-          {images.length > 0 && progress === 100 && !error && !converting && (
-            <div className="flex flex-col gap-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-6">
-              <div className="flex items-start gap-3">
-                <CheckCircle2 className="h-8 w-8 text-emerald-500" />
-                <div>
-                  <p className="font-medium text-emerald-800">
-                    Ready to create {outputMode === 'single' ? 'PDF' : 'PDFs'}!
-                  </p>
-                  <p className="text-sm text-emerald-600">
-                    {images.length} image{images.length !== 1 ? 's' : ''}
-                  </p>
-                </div>
+          {results.length === 0 ? (
+            <button
+              onClick={handleConvert}
+              disabled={converting}
+              className="flex w-full items-center justify-center gap-2 rounded-xl bg-sky-500 py-3.5 font-semibold text-white shadow-lg shadow-sky-500/25 transition-all hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {converting ? (
+                <>
+                  <Loader2 className="h-5 w-5 animate-spin" />
+                  Generating previews... {progress}%
+                </>
+              ) : (
+                <>
+                  <Loader2 className="h-5 w-5" />
+                  Convert to PDF Preview
+                </>
+              )}
+            </button>
+          ) : (
+            <div className="space-y-5">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium text-slate-600">Preview ({results.length} page{results.length !== 1 ? 's' : ''})</span>
               </div>
+
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {results.map((result) => (
+                  <div
+                    key={result.index}
+                    className="group rounded-xl border border-slate-200 bg-white p-3 shadow-sm transition-all hover:shadow-md"
+                  >
+                    <div className="relative aspect-[210/297] overflow-hidden rounded-lg bg-slate-50">
+                      <img
+                        src={result.previewUrl}
+                        alt={`Preview ${result.index + 1}`}
+                        className="h-full w-full object-contain"
+                      />
+                      {outputMode === 'multiple' && (
+                        <button
+                          onClick={() => handleDownload(result.index)}
+                          disabled={converting}
+                          className="absolute bottom-2 right-2 flex items-center gap-1 rounded-lg bg-white/90 px-2 py-1 text-xs font-medium text-sky-600 shadow-sm transition-all hover:bg-white hover:text-sky-700 disabled:opacity-50"
+                        >
+                          <Download className="h-3 w-3" />
+                          Download
+                        </button>
+                      )}
+                    </div>
+                    <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
+                      <span>Page {result.index + 1}</span>
+                      <span>{result.pageSize.toUpperCase()} {result.orientation}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
               <div className="flex flex-wrap gap-2">
                 {outputMode === 'single' ? (
-                  // Single PDF mode - just one download button
                   <button
                     onClick={() => handleDownload()}
                     disabled={converting}
-                    className="flex items-center gap-2 rounded-xl bg-emerald-500 px-4 py-2.5 font-semibold text-white shadow-lg shadow-emerald-500/25 transition-all hover:bg-emerald-600 disabled:opacity-60"
+                    className="flex w-full items-center justify-center gap-2 rounded-xl bg-sky-500 py-3.5 font-semibold text-white shadow-lg shadow-sky-500/25 transition-all hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-60"
                   >
-                    <Download className="h-4 w-4" />
-                    Download PDF
+                    {converting ? (
+                      <>
+                        <Loader2 className="h-5 w-5 animate-spin" />
+                        Generating... {progress}%
+                      </>
+                    ) : (
+                      <>
+                        <Download className="h-5 w-5" />
+                        Download PDF
+                      </>
+                    )}
+                  </button>
+                ) : images.length === 1 ? (
+                  <button
+                    onClick={() => handleDownload(0)}
+                    disabled={converting}
+                    className="flex w-full items-center justify-center gap-2 rounded-xl bg-sky-500 py-3.5 font-semibold text-white shadow-lg shadow-sky-500/25 transition-all hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {converting ? (
+                      <>
+                        <Loader2 className="h-5 w-5 animate-spin" />
+                        Generating... {progress}%
+                      </>
+                    ) : (
+                      <>
+                        <Download className="h-5 w-5" />
+                        Download PDF
+                      </>
+                    )}
                   </button>
                 ) : (
-                  // Multiple PDFs mode - individual downloads + ZIP option
-                  <>
-                    {images.map((_, index) => (
-                      <button
-                        key={index}
-                        onClick={() => handleDownload(index)}
-                        disabled={converting}
-                        className="flex items-center gap-2 rounded-xl bg-emerald-500 px-4 py-2.5 font-semibold text-white shadow-lg shadow-emerald-500/25 transition-all hover:bg-emerald-600 disabled:opacity-60"
-                      >
-                        <Download className="h-4 w-4" />
-                        PDF {index + 1}
-                      </button>
-                    ))}
-                    <button
-                      onClick={() => handleDownloadAll()}
-                      disabled={converting}
-                      className="flex items-center gap-2 rounded-xl bg-slate-600 px-4 py-2.5 font-semibold text-white shadow-lg transition-all hover:bg-slate-700 disabled:opacity-60"
-                    >
-                      <Download className="h-4 w-4" />
-                      Download All as ZIP
-                    </button>
-                  </>
+                  <button
+                    onClick={() => handleDownloadAll()}
+                    disabled={converting}
+                    className="flex w-full items-center justify-center gap-2 rounded-xl bg-sky-500 py-3.5 font-semibold text-white shadow-lg shadow-sky-500/25 transition-all hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {converting ? (
+                      <>
+                        <Loader2 className="h-5 w-5 animate-spin" />
+                        Generating... {progress}%
+                      </>
+                    ) : (
+                      <>
+                        <Download className="h-5 w-5" />
+                        Download All as ZIP
+                      </>
+                    )}
+                  </button>
                 )}
               </div>
             </div>
