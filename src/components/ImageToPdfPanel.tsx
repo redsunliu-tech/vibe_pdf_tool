@@ -92,8 +92,16 @@ export function ImageToPdfPanel() {
     resultsRef.current = results;
   }, [results]);
 
+  useEffect(() => {
+    if (images.length === 1) {
+      setPageSize('fit');
+    } else if (images.length > 1) {
+      setPageSize('a4');
+    }
+  }, [images.length]);
+
   const generatePreview = useCallback(async (image: ImageInput, index: number): Promise<PdfPreviewResult> => {
-    const layout = calculatePageLayout(pageSize, orientation, margin, image.width, image.height);
+    const layout = calculatePageLayout(pageSize, orientation, margin, image.width, image.height, image.dpi);
     
     const img = await new Promise<HTMLImageElement>((resolve, reject) => {
       const imgEl = new Image();
@@ -187,6 +195,8 @@ export function ImageToPdfPanel() {
           previewUrl: URL.createObjectURL(file),
           width: dims.width,
           height: dims.height,
+          bytes: dims.bytes,
+          dpi: dims.dpi,
         });
       }
       setImages((prev) => {

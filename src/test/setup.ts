@@ -1,7 +1,8 @@
 import '@testing-library/jest-dom';
+import { vi } from 'vitest';
 
-global.URL.createObjectURL = vi.fn((blob) => `blob://${Math.random().toString(36).substr(2, 9)}`);
-global.URL.revokeObjectURL = vi.fn();
+(globalThis as any).URL.createObjectURL = vi.fn(() => `blob://${Math.random().toString(36).substring(2, 11)}`);
+(globalThis as any).URL.revokeObjectURL = vi.fn();
 
 const mockCanvasToDataURL = vi.fn(() => 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==');
 const mockGetContext = vi.fn(() => ({
@@ -10,20 +11,36 @@ const mockGetContext = vi.fn(() => ({
   drawImage: vi.fn(),
 }));
 
-global.document.createElement = vi.fn((tag) => {
+interface MockCanvas {
+  width: number;
+  height: number;
+  getContext: typeof mockGetContext;
+  toDataURL: typeof mockCanvasToDataURL;
+}
+
+(globalThis as any).document.createElement = vi.fn((tag: string) => {
   if (tag === 'canvas') {
     return {
       width: 0,
       height: 0,
       getContext: mockGetContext,
       toDataURL: mockCanvasToDataURL,
-    };
+    } as MockCanvas;
   }
   return {};
 });
 
-global.Image = vi.fn(function Image(this: Partial<HTMLImageElement>) {
-  const img: Partial<HTMLImageElement> = {
+interface MockImage {
+  onload?: ((ev: Event) => void) | null;
+  onerror?: ((ev: Event) => void) | null;
+  _src?: string;
+  width: number;
+  height: number;
+  src?: string;
+}
+
+(globalThis as any).Image = vi.fn(function Image() {
+  const img: MockImage = {
     onload: null,
     onerror: null,
     _src: '',
@@ -35,7 +52,7 @@ global.Image = vi.fn(function Image(this: Partial<HTMLImageElement>) {
       img._src = value;
       setTimeout(() => {
         if (typeof img.onload === 'function') {
-          img.onload!();
+          img.onload!(new Event('load'));
         }
       }, 0);
     },

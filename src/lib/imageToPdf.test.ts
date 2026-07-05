@@ -1,48 +1,57 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { calculatePageLayout, convertImagesToPdf, type ImageConvertOptions } from './imageToPdf';
 
+const MM_TO_POINTS = 2.83465;
+const PIXEL_TO_POINTS = 72 / 96;
+
 describe('calculatePageLayout', () => {
   it('should return correct dimensions for A4 portrait with landscape image', () => {
     const layout = calculatePageLayout('a4', 'auto', 10, 1920, 1080);
-    expect(layout.width).toBe(297);
-    expect(layout.height).toBe(210);
+    expect(layout.width).toBeCloseTo(841.89, 2);
+    expect(layout.height).toBeCloseTo(595.28, 2);
     expect(layout.orientation).toBe('landscape');
   });
 
   it('should return correct dimensions for A4 portrait with portrait image', () => {
     const layout = calculatePageLayout('a4', 'auto', 10, 1080, 1920);
-    expect(layout.width).toBe(210);
-    expect(layout.height).toBe(297);
+    expect(layout.width).toBeCloseTo(595.28, 2);
+    expect(layout.height).toBeCloseTo(841.89, 2);
     expect(layout.orientation).toBe('portrait');
   });
 
   it('should return correct dimensions for A4 landscape', () => {
     const layout = calculatePageLayout('a4', 'landscape', 10, 1080, 1920);
-    expect(layout.width).toBe(297);
-    expect(layout.height).toBe(210);
+    expect(layout.width).toBeCloseTo(841.89, 2);
+    expect(layout.height).toBeCloseTo(595.28, 2);
     expect(layout.orientation).toBe('landscape');
   });
 
   it('should return correct dimensions for Letter', () => {
     const layout = calculatePageLayout('letter', 'auto', 10, 1080, 1920);
-    expect(layout.width).toBe(216);
-    expect(layout.height).toBe(279);
+    expect(layout.width).toBeCloseTo(612, 2);
+    expect(layout.height).toBeCloseTo(792, 2);
     expect(layout.orientation).toBe('portrait');
   });
 
   it('should return fit to image dimensions', () => {
     const layout = calculatePageLayout('fit', 'auto', 0, 1080, 1920);
     expect(layout.margin).toBe(0);
-    expect(layout.width).toBeCloseTo(1080 * 0.264583, 2);
-    expect(layout.height).toBeCloseTo(1920 * 0.264583, 2);
+    expect(layout.width).toBe(1080);
+    expect(layout.height).toBe(1920);
   });
 
   it('should calculate correct draw position with margins', () => {
     const layout = calculatePageLayout('a4', 'portrait', 10, 1080, 1920);
     expect(layout.drawX).toBeGreaterThanOrEqual(0);
     expect(layout.drawY).toBeGreaterThanOrEqual(0);
-    expect(layout.drawW).toBeLessThanOrEqual(layout.width - 20);
-    expect(layout.drawH).toBeLessThanOrEqual(layout.height - 20);
+    expect(layout.drawW).toBeLessThanOrEqual(layout.width - 20 * MM_TO_POINTS);
+    expect(layout.drawH).toBeLessThanOrEqual(layout.height - 20 * MM_TO_POINTS);
+  });
+
+  it('should use native pixel dimensions for fit mode regardless of DPI', () => {
+    const layout = calculatePageLayout('fit', 'auto', 0, 1080, 1920, 150);
+    expect(layout.width).toBe(1080);
+    expect(layout.height).toBe(1920);
   });
 });
 
@@ -60,15 +69,15 @@ describe('convertImagesToPdf', () => {
           width: 0,
           height: 0,
           getContext: mockGetContext,
-          toDataURL: vi.fn(() => 'data:image/png;base64,test'),
+          toDataURL: vi.fn(() => 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='),
         };
       }
       return {};
     });
 
     interface MockImage {
-      onload?: ((ev: Event) => any) | null;
-      onerror?: ((ev: Event) => any) | null;
+      onload?: ((ev: Event) => void) | null;
+      onerror?: ((ev: Event) => void) | null;
       _src?: string;
       width: number;
       height: number;
@@ -87,7 +96,7 @@ describe('convertImagesToPdf', () => {
           img._src = value;
           setTimeout(() => {
             if (typeof img.onload === 'function') {
-              img.onload(new Event('load'));
+              img.onload!(new Event('load'));
             }
           }, 0);
         },
@@ -108,8 +117,10 @@ describe('convertImagesToPdf', () => {
       previewUrl: 'blob://test',
       width: 1080,
       height: 1920,
+      bytes: new Uint8Array(0),
+      dpi: 96,
     }], {
-      pageSize: 'a4',
+      pageSize: 'fit',
       orientation: 'auto',
       margin: 10,
       outputMode: 'single',
@@ -131,6 +142,8 @@ describe('convertImagesToPdf', () => {
         previewUrl: 'blob://test1',
         width: 1080,
         height: 1920,
+        bytes: new Uint8Array(0),
+        dpi: 96,
       },
       {
         file: mockFile2,
@@ -138,6 +151,8 @@ describe('convertImagesToPdf', () => {
         previewUrl: 'blob://test2',
         width: 1080,
         height: 1920,
+        bytes: new Uint8Array(0),
+        dpi: 96,
       },
     ], {
       pageSize: 'a4',
@@ -165,6 +180,8 @@ describe('convertImagesToPdf', () => {
       previewUrl: 'blob://test',
       width: 1080,
       height: 1920,
+      bytes: new Uint8Array(0),
+      dpi: 96,
     }], {
       pageSize: 'a4',
       orientation: 'auto',
