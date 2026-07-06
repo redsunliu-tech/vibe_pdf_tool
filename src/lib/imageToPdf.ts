@@ -57,7 +57,7 @@ function readPngDimensions(bytes: Uint8Array): { width: number; height: number; 
     const chunkLength = (bytes[offset] << 24) | (bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3];
     const chunkType = String.fromCharCode(bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7]);
     if (chunkType === 'pHYs') {
-      if (chunkLength >= 9) {
+      if (chunkLength >= 9 && offset + 16 < bytes.length) {
         const xDensity = (bytes[offset + 8] << 24) | (bytes[offset + 9] << 16) | (bytes[offset + 10] << 8) | bytes[offset + 11];
         const unit = bytes[offset + 16];
         if (unit === 1) {
@@ -83,7 +83,9 @@ async function renderImageToPng(img: HTMLImageElement, width: number, height: nu
     throw new Error('Failed to create canvas context');
   }
   ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(img, 0, 0, width, height);
+  const sourceW = img.naturalWidth || img.width;
+  const sourceH = img.naturalHeight || img.height;
+  ctx.drawImage(img, 0, 0, sourceW, sourceH, 0, 0, width, height);
   const pngDataUrl = canvas.toDataURL('image/png');
   return dataUrlToUint8Array(pngDataUrl);
 }
@@ -135,10 +137,9 @@ function readJpegDimensions(bytes: Uint8Array): { width: number; height: number;
   return null;
 }
 
-function readWebpDimensions(bytes: Uint8Array): { width: number; height: number } | null {
+function readWebpDimensions(bytes: Uint8Array): { width: number; height: number; dpi: number } | null {
   if (bytes.length < 20) return null;
   if (bytes[0] !== 0x52 || bytes[1] !== 0x49 || bytes[2] !== 0x46 || bytes[3] !== 0x46) return null;
-  const riffLength = (bytes[4] << 24) | (bytes[5] << 16) | (bytes[6] << 8) | bytes[7];
   if (bytes[8] !== 0x57 || bytes[9] !== 0x45 || bytes[10] !== 0x42 || bytes[11] !== 0x50) return null;
   let offset = 12;
   while (offset + 8 <= bytes.length) {
@@ -149,19 +150,19 @@ function readWebpDimensions(bytes: Uint8Array): { width: number; height: number 
         if (offset + 8 + chunkLength >= 30) {
           const widthMinus1 = (bytes[offset + 26] << 8) | bytes[offset + 27];
           const heightMinus1 = (bytes[offset + 28] << 8) | bytes[offset + 29];
-          return { width: widthMinus1 + 1, height: heightMinus1 + 1 };
+          return { width: widthMinus1 + 1, height: heightMinus1 + 1, dpi: 96 };
         }
       } else if (chunkType === 'VP8L') {
         if (offset + 8 + chunkLength >= 18) {
           const w = bytes[offset + 14] | ((bytes[offset + 15] & 0x3F) << 8);
           const h = ((bytes[offset + 15] >> 6) & 0x03) | (bytes[offset + 16] << 2) | ((bytes[offset + 17] & 0x0F) << 10);
-          return { width: w + 1, height: h + 1 };
+          return { width: w + 1, height: h + 1, dpi: 96 };
         }
       } else if (chunkType === 'VP8X') {
         if (offset + 8 + chunkLength >= 20) {
           const widthMinus1 = (bytes[offset + 16] << 16) | (bytes[offset + 17] << 8) | bytes[offset + 18];
           const heightMinus1 = (bytes[offset + 18] << 16) | (bytes[offset + 19] << 8) | bytes[offset + 20];
-          return { width: widthMinus1 + 1, height: heightMinus1 + 1 };
+          return { width: widthMinus1 + 1, height: heightMinus1 + 1, dpi: 96 };
         }
       }
       return null;
@@ -171,7 +172,7 @@ function readWebpDimensions(bytes: Uint8Array): { width: number; height: number 
   return null;
 }
 
-function readAvifDimensions(bytes: Uint8Array): { width: number; height: number } | null {
+function readAvifDimensions(bytes: Uint8Array): { width: number; height: number; dpi: number } | null {
   if (bytes.length < 24) return null;
   if (bytes[0] !== 0x00 || bytes[1] !== 0x00 || bytes[2] !== 0x00 || bytes[3] !== 0x18) return null;
   if (bytes[4] !== 0x66 || bytes[5] !== 0x74 || bytes[6] !== 0x79 || bytes[7] !== 0x70) return null;
@@ -202,7 +203,7 @@ function readAvifDimensions(bytes: Uint8Array): { width: number; height: number 
                   if (ipcoPos + 24 <= ipcoEnd) {
                     const width = (bytes[ipcoPos + 16] << 24) | (bytes[ipcoPos + 17] << 16) | (bytes[ipcoPos + 18] << 8) | bytes[ipcoPos + 19];
                     const height = (bytes[ipcoPos + 20] << 24) | (bytes[ipcoPos + 21] << 16) | (bytes[ipcoPos + 22] << 8) | bytes[ipcoPos + 23];
-                    return { width, height };
+                    return { width, height, dpi: 96 };
                   }
                 }
                 ipcoPos += itemLength;
@@ -322,7 +323,7 @@ export function detectImageDpi(file: File, bytes: Uint8Array): number {
   return dpi ?? 96;
 }
 
-export function getPngDimensions(bytes: Uint8Array): { width: number; height: number } | null {
+export function getPngDimensions(bytes: Uint8Array): { width: number; height: number; dpi: number } | null {
   return readPngDimensions(bytes);
 }
 
@@ -346,16 +347,6 @@ function dataUrlToUint8Array(dataUrl: string): Uint8Array {
   return u8arr;
 }
 
-function convertImageToPng(img: HTMLImageElement): Uint8Array {
-  const canvas = document.createElement('canvas');
-  canvas.width = img.width;
-  canvas.height = img.height;
-  const ctx = canvas.getContext('2d');
-  ctx?.drawImage(img, 0, 0);
-  const dataUrl = canvas.toDataURL('image/png');
-  return dataUrlToUint8Array(dataUrl);
-}
-
 interface PageLayout {
   width: number;
   height: number;
@@ -376,7 +367,7 @@ export function calculatePageLayout(
   margin: number,
   imgWidth: number,
   imgHeight: number,
-  _dpi?: number
+  dpi: number = 96
 ): PageLayout {
   const imgRatio = imgWidth / imgHeight;
   let pageW: number;
@@ -384,8 +375,8 @@ export function calculatePageLayout(
   let pageFormat: number[];
 
   if (pageSize === 'fit') {
-    pageW = imgWidth;
-    pageH = imgHeight;
+    pageW = imgWidth * (72 / dpi);
+    pageH = imgHeight * (72 / dpi);
     pageFormat = [pageW, pageH];
   } else {
     const basePoints = PDF_PAGE_SIZES[pageSize];
@@ -409,12 +400,15 @@ export function calculatePageLayout(
   const availW = pageW - pageMargin * 2;
   const availH = pageH - pageMargin * 2;
 
-  let drawW = imgWidth;
-  let drawH = imgHeight;
+  const imgPointsW = imgWidth * (72 / dpi);
+  const imgPointsH = imgHeight * (72 / dpi);
+
+  let drawW = imgPointsW;
+  let drawH = imgPointsH;
   if (drawW > availW || drawH > availH) {
-    const scale = Math.min(availW / imgWidth, availH / imgHeight);
-    drawW = imgWidth * scale;
-    drawH = imgHeight * scale;
+    const scale = Math.min(availW / imgPointsW, availH / imgPointsH);
+    drawW = imgPointsW * scale;
+    drawH = imgPointsH * scale;
   }
 
   const x = (pageW - drawW) / 2;
@@ -436,66 +430,58 @@ export function calculatePageLayout(
 async function createPdfForImage(image: ImageInput, options: Omit<ImageConvertOptions, 'outputMode' | 'onProgress'>) {
   const img = await loadImage(image.dataUrl);
   const format = getFormat(image.file);
-  const layout = calculatePageLayout(options.pageSize, options.orientation, options.margin, img.width, img.height, image.dpi);
-
-  const pdfDoc = await PDFDocument.create();
-  
-  let imgBytes: Uint8Array;
-  if (format === 'AVIF') {
-    imgBytes = convertImageToPng(img);
-  } else if (image.bytes.length > 0) {
-    imgBytes = image.bytes;
-  } else {
-    imgBytes = dataUrlToUint8Array(image.dataUrl);
-  }
 
   let drawWidth = img.width;
   let drawHeight = img.height;
   let imageDpi = image.dpi || 72;
 
-  if (format === 'PNG') {
-    const pngDim = readPngDimensions(imgBytes);
+  if (format === 'PNG' && image.bytes.length > 0) {
+    const pngDim = readPngDimensions(image.bytes);
     if (pngDim) {
       drawWidth = pngDim.width;
       drawHeight = pngDim.height;
       imageDpi = pngDim.dpi;
     }
-  } else if (format === 'JPEG') {
-    const jpegDim = readJpegDimensions(imgBytes);
+  } else if (format === 'JPEG' && image.bytes.length > 0) {
+    const jpegDim = readJpegDimensions(image.bytes);
     if (jpegDim) {
       drawWidth = jpegDim.width;
       drawHeight = jpegDim.height;
       imageDpi = jpegDim.dpi;
     }
-  } else if (format === 'WEBP') {
-    const webpDim = readWebpDimensions(imgBytes);
+  } else if (format === 'WEBP' && image.bytes.length > 0) {
+    const webpDim = readWebpDimensions(image.bytes);
     if (webpDim) {
       drawWidth = webpDim.width;
       drawHeight = webpDim.height;
+      imageDpi = webpDim.dpi;
     }
-  } else if (format === 'AVIF') {
-    const avifDim = readAvifDimensions(imgBytes);
+  } else if (format === 'AVIF' && image.bytes.length > 0) {
+    const avifDim = readAvifDimensions(image.bytes);
     if (avifDim) {
       drawWidth = avifDim.width;
       drawHeight = avifDim.height;
+      imageDpi = avifDim.dpi;
     }
   }
 
-  let embeddedImage;
-  let pixelW = drawWidth;
-  let pixelH = drawHeight;
+  const layout = calculatePageLayout(options.pageSize, options.orientation, options.margin, drawWidth, drawHeight, imageDpi);
 
-  if (format === 'PNG') {
-    embeddedImage = await pdfDoc.embedPng(imgBytes);
-  } else if (format === 'JPEG') {
-    embeddedImage = await pdfDoc.embedJpg(imgBytes);
+  const pdfDoc = await PDFDocument.create();
+  
+  let embeddedImage;
+
+  if (format === 'PNG' && image.bytes.length > 0) {
+    embeddedImage = await pdfDoc.embedPng(image.bytes);
+  } else if (format === 'JPEG' && image.bytes.length > 0) {
+    embeddedImage = await pdfDoc.embedJpg(image.bytes);
   } else {
-    const convertedPng = await renderImageToPng(img, drawWidth, drawHeight, imageDpi);
+    const convertedPng = await renderImageToPng(img, drawWidth, drawHeight);
     embeddedImage = await pdfDoc.embedPng(convertedPng);
   }
 
-  const pageWidth = pixelW * (72 / imageDpi);
-  const pageHeight = pixelH * (72 / imageDpi);
+  const pageWidth = drawWidth * (72 / imageDpi);
+  const pageHeight = drawHeight * (72 / imageDpi);
 
   if (options.pageSize === 'fit') {
     pdfDoc.addPage([pageWidth, pageHeight] as [number, number]);
@@ -564,64 +550,56 @@ export async function convertImagesToPdf(
     const image = images[i];
     const img = await loadImage(image.dataUrl);
     const format = getFormat(image.file);
-    const layout = calculatePageLayout(options.pageSize, options.orientation, options.margin, img.width, img.height, image.dpi);
-
-    let imgBytes: Uint8Array;
-    if (format === 'AVIF') {
-      imgBytes = convertImageToPng(img);
-    } else if (image.bytes.length > 0) {
-      imgBytes = image.bytes;
-    } else {
-      imgBytes = dataUrlToUint8Array(image.dataUrl);
-    }
 
     let drawWidth = img.width;
     let drawHeight = img.height;
     let imageDpi = image.dpi || 72;
 
-    if (format === 'PNG') {
-      const pngDim = readPngDimensions(imgBytes);
+    if (format === 'PNG' && image.bytes.length > 0) {
+      const pngDim = readPngDimensions(image.bytes);
       if (pngDim) {
         drawWidth = pngDim.width;
         drawHeight = pngDim.height;
         imageDpi = pngDim.dpi;
       }
-    } else if (format === 'JPEG') {
-      const jpegDim = readJpegDimensions(imgBytes);
+    } else if (format === 'JPEG' && image.bytes.length > 0) {
+      const jpegDim = readJpegDimensions(image.bytes);
       if (jpegDim) {
         drawWidth = jpegDim.width;
         drawHeight = jpegDim.height;
         imageDpi = jpegDim.dpi;
       }
-    } else if (format === 'WEBP') {
-      const webpDim = readWebpDimensions(imgBytes);
+    } else if (format === 'WEBP' && image.bytes.length > 0) {
+      const webpDim = readWebpDimensions(image.bytes);
       if (webpDim) {
         drawWidth = webpDim.width;
         drawHeight = webpDim.height;
+        imageDpi = webpDim.dpi;
       }
-    } else if (format === 'AVIF') {
-      const avifDim = readAvifDimensions(imgBytes);
+    } else if (format === 'AVIF' && image.bytes.length > 0) {
+      const avifDim = readAvifDimensions(image.bytes);
       if (avifDim) {
         drawWidth = avifDim.width;
         drawHeight = avifDim.height;
+        imageDpi = avifDim.dpi;
       }
     }
 
-    let embeddedImage;
-    let pixelW = drawWidth;
-    let pixelH = drawHeight;
+    const layout = calculatePageLayout(options.pageSize, options.orientation, options.margin, drawWidth, drawHeight, imageDpi);
 
-    if (format === 'PNG') {
-      embeddedImage = await pdfDoc.embedPng(imgBytes);
-    } else if (format === 'JPEG') {
-      embeddedImage = await pdfDoc.embedJpg(imgBytes);
+    let embeddedImage;
+
+    if (format === 'PNG' && image.bytes.length > 0) {
+      embeddedImage = await pdfDoc.embedPng(image.bytes);
+    } else if (format === 'JPEG' && image.bytes.length > 0) {
+      embeddedImage = await pdfDoc.embedJpg(image.bytes);
     } else {
       const convertedPng = await renderImageToPng(img, drawWidth, drawHeight);
       embeddedImage = await pdfDoc.embedPng(convertedPng);
     }
 
-    const pageWidth = pixelW * (72 / imageDpi);
-    const pageHeight = pixelH * (72 / imageDpi);
+    const pageWidth = drawWidth * (72 / imageDpi);
+    const pageHeight = drawHeight * (72 / imageDpi);
 
     if (options.pageSize === 'fit') {
       pdfDoc.addPage([pageWidth, pageHeight] as [number, number]);

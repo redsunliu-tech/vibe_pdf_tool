@@ -59,6 +59,7 @@ export function ImageToPdfPanel() {
   const conversionRequestRef = useRef(0);
   const pdfCache = useRef<Map<number, Blob>>(new Map());
   const resultsRef = useRef<PdfPreviewResult[]>([]);
+  const progressBarRef = useRef<HTMLDivElement>(null);
 
   function dataUrlToBlob(dataUrl: string): Blob {
     const parts = dataUrl.split(',');
@@ -123,13 +124,14 @@ export function ImageToPdfPanel() {
     ctx!.fillStyle = '#ffffff';
     ctx!.fillRect(0, 0, canvasWidth, canvasHeight);
     
-    const drawScale = Math.min(1, (canvasWidth - (layout.margin * scale * 2)) / img.width);
-    const drawW = img.width * drawScale;
-    const drawH = img.height * drawScale;
+    const drawW = layout.drawW * scale;
+    const drawH = layout.drawH * scale;
     const drawX = (canvasWidth - drawW) / 2;
     const drawY = (canvasHeight - drawH) / 2;
     
-    ctx!.drawImage(img, drawX, drawY, drawW, drawH);
+    const sourceW = img.naturalWidth || img.width;
+    const sourceH = img.naturalHeight || img.height;
+    ctx!.drawImage(img, 0, 0, sourceW, sourceH, drawX, drawY, drawW, drawH);
     
     const dataUrl = canvas.toDataURL('image/png');
     const previewUrl = URL.createObjectURL(dataUrlToBlob(dataUrl));
@@ -169,11 +171,17 @@ export function ImageToPdfPanel() {
 
     window.addEventListener('pdf-tool:clear-all', handleClearAll);
     return () => window.removeEventListener('pdf-tool:clear-all', handleClearAll);
-  }, []);
+  }, [clearResults]);
 
   useEffect(() => {
     clearResults();
-  }, [pageSize, orientation, margin, outputMode]);
+  }, [pageSize, orientation, margin, outputMode, clearResults]);
+
+  useEffect(() => {
+    if (progressBarRef.current) {
+      progressBarRef.current.style.width = `${progress}%`;
+    }
+  }, [progress]);
 
   const handleFiles = useCallback(async (files: File[]) => {
     const valid = files.filter((f) => f.type.startsWith('image/'));
@@ -284,7 +292,7 @@ export function ImageToPdfPanel() {
         setConverting(false);
       }
     }
-  }, [images, generatePreview]);
+  }, [images, generatePreview, clearResults]);
 
   const generatePdf = useCallback(async (index?: number): Promise<Blob[]> => {
     setConverting(true);
@@ -434,6 +442,7 @@ export function ImageToPdfPanel() {
               <input
                 id="img-add-more"
                 type="file"
+                title="Add more images"
                 accept="image/png,image/jpeg,image/bmp,image/webp,.png,.jpg,.jpeg,.bmp,.webp"
                 multiple
                 className="hidden"
@@ -575,11 +584,12 @@ export function ImageToPdfPanel() {
                     </div>
 
                     <div className="sm:col-span-2">
-                      <label className="mb-2 flex items-center justify-between text-sm font-medium text-slate-600">
+                      <label htmlFor="page-margin" className="mb-2 flex items-center justify-between text-sm font-medium text-slate-600">
                         <span>Page Margin</span>
                         <span className="text-sky-600">{margin} mm</span>
                       </label>
                       <input
+                        id="page-margin"
                         type="range"
                         min={0}
                         max={40}
@@ -599,8 +609,8 @@ export function ImageToPdfPanel() {
           {converting && (
             <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
               <div
+                ref={progressBarRef}
                 className="h-full rounded-full bg-gradient-to-r from-sky-400 to-sky-600 transition-all duration-300"
-                style={{ width: `${progress}%` }}
               />
             </div>
           )}

@@ -8,29 +8,30 @@ import {
   renderPdfPageToBlob,
   type ImageFormat,
   type PdfPageResult,
+  type QualityMode,
 } from '../lib/pdfToImage';
 import { downloadAsZip } from '../lib/zipUtils';
 
-const FORMAT_OPTIONS: { value: ImageFormat; label: string }[] = [
+const FORMAT_OPTIONS: { value: ImageFormat | 'auto'; label: string }[] = [
+  { value: 'auto', label: 'Auto' },
   { value: 'png', label: 'PNG' },
   { value: 'jpg', label: 'JPG' },
-  { value: 'avif', label: 'AVIF' },
-  { value: 'webp', label: 'WebP' },
 ];
 
-const MIN_RESOLUTION_OPTIONS = [
-  { value: 0, label: 'Original' },
-  { value: 1280, label: '720p (1280×720)' },
-  { value: 1920, label: '1080p (1920×1080)' },
-  { value: 2560, label: '1440p (2560×1440)' },
-  { value: 3840, label: '4K (3840×2160)' },
+const DPI_OPTIONS: { value: number | 'original'; label: string }[] = [
+  { value: 'original', label: 'Original' },
+  { value: 72, label: '72 DPI' },
+  { value: 150, label: '150 DPI' },
+  { value: 300, label: '300 DPI' },
+  { value: 600, label: '600 DPI' },
 ];
 
 export function PdfToImagePanel() {
   const [file, setFile] = useState<File | null>(null);
-  const [format, setFormat] = useState<ImageFormat>('png');
-  const [minResolution, setMinResolution] = useState(1920);
+  const [format, setFormat] = useState<ImageFormat | 'auto'>('auto');
+  const [dpi, setDpi] = useState<number | 'original'>('original');
   const [quality, setQuality] = useState(0.92);
+  const [qualityMode, setQualityMode] = useState<QualityMode>('original');
   const [converting, setConverting] = useState(false);
   const [progress, setProgress] = useState(0);
   const [results, setResults] = useState<PdfPageResult[]>([]);
@@ -40,6 +41,7 @@ export function PdfToImagePanel() {
   const previewUrlsRef = useRef<string[]>([]);
   const conversionRequestRef = useRef(0);
   const fullResCache = useRef<Map<number, Blob>>(new Map()); // Cache for full-res images
+  const progressBarRef = useRef<HTMLDivElement>(null);
 
   const syncPreviewUrls = useCallback((nextResults: PdfPageResult[]) => {
     const nextUrls = nextResults.map((page) => page.previewUrl);
@@ -50,12 +52,19 @@ export function PdfToImagePanel() {
   }, []);
 
   useEffect(() => {
+    const cache = fullResCache.current;
     return () => {
       previewUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
       previewUrlsRef.current = [];
-      fullResCache.current.clear();
+      cache.clear();
     };
   }, [syncPreviewUrls]);
+
+  useEffect(() => {
+    if (progressBarRef.current) {
+      progressBarRef.current.style.width = `${progress}%`;
+    }
+  }, [progress]);
 
   useEffect(() => {
     const handleClearAll = () => {
@@ -101,9 +110,9 @@ export function PdfToImagePanel() {
     try {
       const pages = await convertPdfToImages(file, {
         format,
-        minScale: 1,
-        minResolution: { width: minResolution, height: Math.round((minResolution / 16) * 9) },
+        dpi,
         quality,
+        qualityMode,
         onProgress: (current, total) => setProgress(Math.round((current / total) * 100)),
       });
       
@@ -123,7 +132,7 @@ export function PdfToImagePanel() {
         setConverting(false);
       }
     }
-  }, [file, format, minResolution, quality]);
+  }, [file, format, dpi, quality, qualityMode, syncPreviewUrls]);
 
   const handleDownloadOne = useCallback(async (page: PdfPageResult) => {
     if (!file) return;
@@ -139,20 +148,21 @@ export function PdfToImagePanel() {
         // Generate full-res image
         blob = await renderPdfPageToBlob(file, page.pageNumber, {
           format,
-          minScale: 1,
-          minResolution: { width: minResolution, height: Math.round((minResolution / 16) * 9) },
+          dpi,
           quality,
+          qualityMode,
         });
         fullResCache.current.set(page.pageNumber, blob);
       }
       
-      downloadBlob(blob, `${base}_page_${page.pageNumber}.${format}`);
+      const ext = format === 'auto' ? page.format : format;
+      downloadBlob(blob, `${base}_page_${page.pageNumber}.${ext}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Download failed');
     } finally {
       setConverting(false);
     }
-  }, [file, format, minResolution, quality]);
+  }, [file, format, dpi, quality]);
 
   const handleDownloadAll = useCallback(async () => {
     if (!file) return;
@@ -173,16 +183,17 @@ export function PdfToImagePanel() {
         if (!blob) {
           blob = await renderPdfPageToBlob(file, page.pageNumber, {
             format,
-            minScale: 1,
-            minResolution: { width: minResolution, height: Math.round((minResolution / 16) * 9) },
+            dpi,
             quality,
+            qualityMode,
           });
           fullResCache.current.set(page.pageNumber, blob);
         }
         
+        const ext = format === 'auto' ? page.format : format;
         zipFiles.push({
           blob,
-          filename: `${base}_page_${page.pageNumber}.${format}`,
+          filename: `${base}_page_${page.pageNumber}.${ext}`,
         });
         
         setProgress(Math.round(((i + 1) / results.length) * 100));
@@ -195,7 +206,7 @@ export function PdfToImagePanel() {
     } finally {
       setConverting(false);
     }
-  }, [file, format, minResolution, quality, results]);
+  }, [file, format, dpi, quality, results]);
 
   const handleReset = () => {
     conversionRequestRef.current += 1;
@@ -266,36 +277,65 @@ export function PdfToImagePanel() {
                 </div>
 
                 <div>
-                  <label className="mb-2 block text-sm font-medium text-slate-600">Minimum Resolution</label>
+                  <label htmlFor="dpi" className="mb-2 block text-sm font-medium text-slate-600">DPI</label>
                   <select
-                    value={minResolution}
-                    onChange={(e) => setMinResolution(Number(e.target.value))}
+                    id="dpi"
+                    value={dpi}
+                    onChange={(e) => setDpi(e.target.value === 'original' ? 'original' : Number(e.target.value))}
                     className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-100"
                   >
-                    {MIN_RESOLUTION_OPTIONS.map((opt) => (
+                    {DPI_OPTIONS.map((opt) => (
                       <option key={opt.value} value={opt.value}>{opt.label}</option>
                     ))}
                   </select>
                   <p className="mt-1.5 text-xs text-slate-400">
-                    Output is guaranteed to be at least this size (16:9). Smaller pages are scaled up.
+                    Output resolution in dots per inch. Original uses page's native resolution.
                   </p>
                 </div>
 
-                {(format === 'jpg' || format === 'webp') && (
+                {format === 'jpg' && (
                   <div className="sm:col-span-2">
-                    <label className="mb-2 flex items-center justify-between text-sm font-medium text-slate-600">
-                      <span>Quality</span>
-                      <span className="text-sky-600">{Math.round(quality * 100)}%</span>
-                    </label>
-                    <input
-                      type="range"
-                      min={0.3}
-                      max={1}
-                      step={0.01}
-                      value={quality}
-                      onChange={(e) => setQuality(Number(e.target.value))}
-                      className="w-full accent-sky-500"
-                    />
+                    <label className="mb-2 block text-sm font-medium text-slate-600">Compression</label>
+                    <div className="grid grid-cols-2 gap-2 mb-3">
+                      <button
+                        onClick={() => setQualityMode('original')}
+                        className={`rounded-lg py-2 text-sm font-medium transition-all ${
+                          qualityMode === 'original'
+                            ? 'bg-sky-500 text-white shadow-sm'
+                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                        }`}
+                      >
+                        Original Quality
+                      </button>
+                      <button
+                        onClick={() => setQualityMode('custom')}
+                        className={`rounded-lg py-2 text-sm font-medium transition-all ${
+                          qualityMode === 'custom'
+                            ? 'bg-sky-500 text-white shadow-sm'
+                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                        }`}
+                      >
+                        Custom
+                      </button>
+                    </div>
+                    {qualityMode === 'custom' && (
+                      <>
+                        <label htmlFor="quality" className="mb-2 flex items-center justify-between text-sm font-medium text-slate-600">
+                          <span>Quality</span>
+                          <span className="text-sky-600">{Math.round(quality * 100)}%</span>
+                        </label>
+                        <input
+                          id="quality"
+                          type="range"
+                          min={0.3}
+                          max={1}
+                          step={0.01}
+                          value={quality}
+                          onChange={(e) => setQuality(Number(e.target.value))}
+                          className="w-full accent-sky-500"
+                        />
+                      </>
+                    )}
                   </div>
                 )}
               </div>
@@ -316,7 +356,7 @@ export function PdfToImagePanel() {
             ) : (
               <>
                 <Images className="h-5 w-5" />
-                Convert to {format.toUpperCase()}
+                Convert to {format === 'auto' ? 'Image' : format.toUpperCase()}
               </>
             )}
           </button>
@@ -325,8 +365,8 @@ export function PdfToImagePanel() {
           {converting && (
             <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
               <div
+                ref={progressBarRef}
                 className="h-full rounded-full bg-gradient-to-r from-sky-400 to-sky-600 transition-all duration-300"
-                style={{ width: `${progress}%` }}
               />
             </div>
           )}

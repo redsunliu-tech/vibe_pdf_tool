@@ -2,7 +2,6 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { calculatePageLayout, convertImagesToPdf, type ImageConvertOptions } from './imageToPdf';
 
 const MM_TO_POINTS = 2.83465;
-const PIXEL_TO_POINTS = 72 / 96;
 
 describe('calculatePageLayout', () => {
   it('should return correct dimensions for A4 portrait with landscape image', () => {
@@ -33,25 +32,25 @@ describe('calculatePageLayout', () => {
     expect(layout.orientation).toBe('portrait');
   });
 
-  it('should return fit to image dimensions', () => {
-    const layout = calculatePageLayout('fit', 'auto', 0, 1080, 1920);
+  it('should return fit to image dimensions in points', () => {
+    const layout = calculatePageLayout('fit', 'auto', 0, 1080, 1920, 96);
     expect(layout.margin).toBe(0);
-    expect(layout.width).toBe(1080);
-    expect(layout.height).toBe(1920);
+    expect(layout.width).toBeCloseTo(810, 2);
+    expect(layout.height).toBeCloseTo(1440, 2);
   });
 
   it('should calculate correct draw position with margins', () => {
-    const layout = calculatePageLayout('a4', 'portrait', 10, 1080, 1920);
+    const layout = calculatePageLayout('a4', 'portrait', 10, 1080, 1920, 96);
     expect(layout.drawX).toBeGreaterThanOrEqual(0);
     expect(layout.drawY).toBeGreaterThanOrEqual(0);
     expect(layout.drawW).toBeLessThanOrEqual(layout.width - 20 * MM_TO_POINTS);
     expect(layout.drawH).toBeLessThanOrEqual(layout.height - 20 * MM_TO_POINTS);
   });
 
-  it('should use native pixel dimensions for fit mode regardless of DPI', () => {
+  it('should convert pixel dimensions to points for fit mode based on DPI', () => {
     const layout = calculatePageLayout('fit', 'auto', 0, 1080, 1920, 150);
-    expect(layout.width).toBe(1080);
-    expect(layout.height).toBe(1920);
+    expect(layout.width).toBeCloseTo(518.4, 2);
+    expect(layout.height).toBeCloseTo(921.6, 2);
   });
 });
 
@@ -63,16 +62,18 @@ describe('convertImagesToPdf', () => {
       drawImage: vi.fn(),
     }));
     
-    (globalThis as any).document.createElement = vi.fn((tag: string) => {
-      if (tag === 'canvas') {
-        return {
-          width: 0,
-          height: 0,
-          getContext: mockGetContext,
-          toDataURL: vi.fn(() => 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='),
-        };
-      }
-      return {};
+    vi.stubGlobal('document', {
+      createElement: vi.fn((tag: string) => {
+        if (tag === 'canvas') {
+          return {
+            width: 0,
+            height: 0,
+            getContext: mockGetContext,
+            toDataURL: vi.fn(() => 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='),
+          };
+        }
+        return {};
+      }),
     });
 
     interface MockImage {
@@ -81,15 +82,19 @@ describe('convertImagesToPdf', () => {
       _src?: string;
       width: number;
       height: number;
+      naturalWidth: number;
+      naturalHeight: number;
       src?: string;
     }
     
-    (globalThis as any).Image = vi.fn(function Image() {
+    vi.stubGlobal('Image', vi.fn(function Image() {
       const img: MockImage = {
         onload: null,
         onerror: null,
         width: 1080,
         height: 1920,
+        naturalWidth: 1080,
+        naturalHeight: 1920,
       };
       Object.defineProperty(img, 'src', {
         set(value: string) {
@@ -105,7 +110,7 @@ describe('convertImagesToPdf', () => {
         },
       });
       return img;
-    });
+    }));
   });
 
   it('should generate single PDF for single mode', async () => {
