@@ -47,6 +47,7 @@ export function Dropzone({ onFiles, accept, title, subtitle, icon }: DropzonePro
       <input
         ref={inputRef}
         type="file"
+        title={title}
         accept={accept}
         multiple
         onChange={handleSelect}
