@@ -151,6 +151,7 @@ export function PdfToImagePanel() {
           dpi,
           quality,
           qualityMode,
+          outputFormat: format === 'auto' ? page.format : undefined,
         });
         fullResCache.current.set(page.pageNumber, blob);
       }
@@ -162,7 +163,7 @@ export function PdfToImagePanel() {
     } finally {
       setConverting(false);
     }
-  }, [file, format, dpi, quality]);
+  }, [file, format, dpi, quality, qualityMode]);
 
   const handleDownloadAll = useCallback(async () => {
     if (!file) return;
@@ -186,6 +187,7 @@ export function PdfToImagePanel() {
             dpi,
             quality,
             qualityMode,
+            outputFormat: format === 'auto' ? page.format : undefined,
           });
           fullResCache.current.set(page.pageNumber, blob);
         }
@@ -206,7 +208,7 @@ export function PdfToImagePanel() {
     } finally {
       setConverting(false);
     }
-  }, [file, format, dpi, quality, results]);
+  }, [file, format, dpi, quality, qualityMode, results]);
 
   const handleReset = () => {
     conversionRequestRef.current += 1;

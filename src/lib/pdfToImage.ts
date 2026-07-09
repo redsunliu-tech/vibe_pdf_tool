@@ -22,6 +22,7 @@ export interface PdfConvertOptions {
   quality: number;
   qualityMode: QualityMode;
   onProgress?: (current: number, total: number) => void;
+  outputFormat?: ImageFormat;
 }
 
 async function extractRawJpeg(page: pdfjsLib.PDFPageProxy): Promise<Uint8Array | null> {
@@ -78,93 +79,68 @@ async function extractRawJpeg(page: pdfjsLib.PDFPageProxy): Promise<Uint8Array |
         }
       }
     }
+    return null;
   } catch {
+    return null;
   }
-  return null;
 }
 
-async function detectImageFormat(page: pdfjsLib.PDFPageProxy): Promise<ImageFormat> {
+async function calcFullImageCoverage(page: pdfjsLib.PDFPageProxy): Promise<boolean> {
   try {
     const operators = await page.getOperatorList();
     const { fnArray, argsArray } = operators;
     const OPS = pdfjsLib.OPS;
     
-    let hasJpeg = false;
-    let hasPng = false;
-    let hasCcitt = false;
-    let hasImage = false;
+    const viewport = page.getViewport({ scale: 1 });
+    const pageWidth = viewport.width;
+    const pageHeight = viewport.height;
+    const pageArea = pageWidth * pageHeight;
+    
+    let totalImageArea = 0;
     
     for (let i = 0; i < fnArray.length; i++) {
       const op = fnArray[i];
       
-      if (op === OPS.paintImageXObject || op === OPS.paintInlineImageXObject) {
-        hasImage = true;
+      if (op === OPS.paintImageXObject) {
         const imgName = argsArray[i][0];
-        
         if (typeof imgName === 'string') {
           const imgObj = await new Promise((resolve) => {
             page.objs.get(imgName, resolve);
           });
           
-          if (!imgObj || typeof imgObj !== 'object') continue;
-          
-          const obj = imgObj as Record<string, unknown>;
-          
-          if (obj.dict && typeof obj.dict === 'object') {
-            const dict = obj.dict as Record<string, unknown>;
-            if (dict.get && typeof dict.get === 'function') {
-              const filter = dict.get('Filter');
-              if (filter && typeof filter === 'object') {
-                const filterObj = filter as Record<string, unknown>;
-                if (typeof filterObj.name === 'string') {
-                  switch (filterObj.name) {
-                    case 'DCTDecode':
-                      hasJpeg = true;
-                      break;
-                    case 'JPXDecode':
-                      hasJpeg = true;
-                      break;
-                    case 'CCITTFaxDecode':
-                      hasCcitt = true;
-                      break;
-                    case 'JBIG2Decode':
-                      hasCcitt = true;
-                      break;
-                  }
-                }
-              }
-            }
-          }
-          
-          if (!hasJpeg && !hasCcitt && obj.data && obj.data instanceof Uint8Array) {
-            const data = obj.data;
-            if (data.length >= 2 && data[0] === 0xFF && data[1] === 0xD8) {
-              hasJpeg = true;
-            } else if (data.length >= 8) {
-              const sig = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
-              let isPng = true;
-              for (let k = 0; k < 8; k++) {
-                if (data[k] !== sig[k]) {
-                  isPng = false;
-                  break;
-                }
-              }
-              if (isPng) hasPng = true;
+          if (imgObj && typeof imgObj === 'object') {
+            const obj = imgObj as Record<string, unknown>;
+            if (obj.width && obj.height) {
+              const imgWidth = Number(obj.width);
+              const imgHeight = Number(obj.height);
+              totalImageArea += imgWidth * imgHeight;
             }
           }
         }
       }
     }
     
-    if (!hasImage) return 'png';
-    
-    if (hasCcitt) return 'jpg';
-    if (hasJpeg) return 'jpg';
-    if (hasPng) return 'png';
-    
-    return 'jpg';
+    return totalImageArea / pageArea > 0.9;
   } catch {
-    return 'jpg';
+    return false;
+  }
+}
+
+async function isScanPdf(page: pdfjsLib.PDFPageProxy): Promise<boolean> {
+  try {
+
+    const ops = await page.getOperatorList();
+    const hasTextOp = ops.fnArray.some((f: number) => f === 32);
+    const hasImageOp = ops.fnArray.some((f: number) => f === 35);
+    
+    const fullPageImage = await calcFullImageCoverage(page);
+    
+    if (!hasTextOp && hasImageOp && fullPageImage) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
   }
 }
 
@@ -540,8 +516,7 @@ export async function convertPdfToImages(
     const page = await pdf.getPage(i);
     const baseViewport = page.getViewport({ scale: 1 });
 
-    const previewMaxDim = 150;
-    const previewScale = Math.min(1, previewMaxDim / Math.max(baseViewport.width, baseViewport.height));
+    const previewScale = 1;
     const previewViewport = page.getViewport({ scale: previewScale });
     
     const canvas = document.createElement('canvas');
@@ -557,11 +532,15 @@ export async function convertPdfToImages(
     
     const previewBlob = await canvasToFormatBlob(canvas, 'jpg', 0.8);
     const previewUrl = URL.createObjectURL(previewBlob);
-
-    const originalDpi = await detectPageDpi(page);
     
-    const outputFormat = options.format === 'auto' ? await detectImageFormat(page) : options.format;
-    const scale = originalDpi / 72;
+    let outputFormat: ImageFormat;
+    if (options.format === 'auto') {
+      const isScan = await isScanPdf(page);
+      outputFormat = isScan ? 'jpg' : 'png';
+    } else {
+      outputFormat = options.format;
+    }
+    const scale = 1;
 
     results.push({
       pageNumber: i,
@@ -598,6 +577,95 @@ export function formatBytes(bytes: number): string {
   const sizes = ['B', 'KB', 'MB', 'GB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
+}
+
+const TILE_SIZE = 2000;
+
+async function renderPageWithTiles(
+  page: pdfjsLib.PDFPageProxy,
+  viewport: pdfjsLib.PageViewport,
+  dpi: number,
+): Promise<Blob> {
+  const pageW = Math.round(viewport.width);
+  const pageH = Math.round(viewport.height);
+  
+  console.log(`[TILE DEBUG] renderPageWithTiles called! pageW=${pageW}, pageH=${pageH}, scale=${viewport.scale}, dpi=${dpi}`);
+  
+  const fullPixels = new Uint8Array(pageW * pageH * 4);
+  
+  for (let offsetY = 0; offsetY < pageH; offsetY += TILE_SIZE) {
+    for (let offsetX = 0; offsetX < pageW; offsetX += TILE_SIZE) {
+      const tileW = Math.min(TILE_SIZE, pageW - offsetX);
+      const tileH = Math.min(TILE_SIZE, pageH - offsetY);
+      
+      const tileCanvas = new OffscreenCanvas(tileW, tileH);
+      const ctx = tileCanvas.getContext('2d');
+      if (!ctx) continue;
+      
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, tileW, tileH);
+      
+      const tileViewport = page.getViewport({
+        scale: viewport.scale,
+        offsetX: -offsetX,
+        offsetY: -offsetY,
+        width: tileW,
+        height: tileH,
+      } as { scale: number; offsetX?: number; offsetY?: number; width?: number; height?: number });
+      
+      await page.render({
+        canvas: tileCanvas as unknown as HTMLCanvasElement,
+        canvasContext: ctx as unknown as CanvasRenderingContext2D,
+        viewport: tileViewport,
+      }).promise;
+      
+      const imgData = ctx.getImageData(0, 0, tileW, tileH);
+      const tilePixel = imgData.data;
+      
+      for (let y = 0; y < tileH; y++) {
+        const srcRowStart = y * tileW * 4;
+        const dstRowStart = ((offsetY + y) * pageW + offsetX) * 4;
+        fullPixels.set(
+          tilePixel.subarray(srcRowStart, srcRowStart + tileW * 4),
+          dstRowStart,
+        );
+      }
+      
+      tileCanvas.width = 0;
+      tileCanvas.height = 0;
+    }
+  }
+  
+  console.log(`[TILE DEBUG] Starting UPNG encoding via Worker`);
+  
+  const worker = new Worker(new URL('./worker-upng.ts', import.meta.url), {
+    type: 'module',
+  });
+  
+  const result = await new Promise<Uint8Array>((resolve, reject) => {
+    worker.onmessage = (e) => {
+      worker.terminate();
+      if (e.data.error) {
+        reject(new Error(e.data.error));
+      } else {
+        resolve(e.data);
+      }
+    };
+    
+    worker.onerror = (err) => {
+      worker.terminate();
+      reject(err);
+    };
+    
+    worker.postMessage(
+      { pixelData: fullPixels, w: pageW, h: pageH, dpi },
+      [fullPixels.buffer],
+    );
+  });
+  
+  console.log(`[TILE DEBUG] UPNG encoding completed, length=${result.length}`);
+  
+  return new Blob([new Uint8Array(result)], { type: 'image/png' });
 }
 
 async function renderPageToCanvas(
@@ -658,8 +726,15 @@ export async function renderPdfPageToBlob(
   const pdf = await loadingTask.promise;
   const page = await pdf.getPage(pageNumber);
 
-  const outputFormat = options.format === 'auto' ? await detectImageFormat(page) : options.format;
-  console.log('[DPI DEBUG] renderPdfPageToBlob: outputFormat=', outputFormat, 'options.format=', options.format);
+  let outputFormat: ImageFormat;
+  if (options.outputFormat) {
+    outputFormat = options.outputFormat;
+  } else if (options.format === 'auto') {
+    const isScan = await isScanPdf(page);
+    outputFormat = isScan ? 'jpg' : 'png';
+  } else {
+    outputFormat = options.format;
+  }
   
   const tempCanvas = document.createElement('canvas');
   const tempContext = tempCanvas.getContext('2d');
@@ -672,14 +747,32 @@ export async function renderPdfPageToBlob(
     await page.render({ canvas: tempCanvas, canvasContext: tempContext, viewport: tempViewport }).promise;
   }
   
-  let originalDpi = await detectPageDpi(page);
   let targetDpi = options.dpi;
+  
   if (targetDpi === 'original') {
-    targetDpi = originalDpi;
+    if (outputFormat === 'png') {
+      targetDpi = 300;
+    } else {
+      const originalDpi = await detectPageDpi(page);
+      const isScan = await isScanPdf(page);
+      if (!isScan) {
+        targetDpi = 300;
+      } else {
+        if (originalDpi < 140) {
+          targetDpi = 72;
+        } else if (originalDpi < 290) {
+          targetDpi = 150;
+        } else {
+          targetDpi = 300;
+        }
+      }
+    }
   }
   
-  const scale = originalDpi / 72;
+  const scale = targetDpi / 72;
   const viewport = page.getViewport({ scale });
+  
+  console.log(`[RENDER DEBUG] targetDpi=${targetDpi}, outputFormat=${outputFormat}, scale=${scale}, viewport.width=${viewport.width}`);
   
   let blob: Blob;
   
@@ -688,9 +781,13 @@ export async function renderPdfPageToBlob(
     if (rawJpeg) {
       const jpgWithDpi = injectExifDpi(rawJpeg, Math.round(targetDpi), Math.round(targetDpi));
       blob = new Blob([new Uint8Array(jpgWithDpi)], { type: 'image/jpeg' });
+    } else if (typeof OffscreenCanvas !== 'undefined' && targetDpi >= 600) {
+      blob = await renderPageWithTiles(page, viewport, targetDpi);
     } else {
       blob = await renderPageToCanvas(page, viewport, outputFormat, options.quality, targetDpi);
     }
+  } else if (typeof OffscreenCanvas !== 'undefined' && targetDpi >= 600) {
+    blob = await renderPageWithTiles(page, viewport, targetDpi);
   } else {
     blob = await renderPageToCanvas(page, viewport, outputFormat, options.quality, targetDpi);
   }
