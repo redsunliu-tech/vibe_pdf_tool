@@ -468,11 +468,19 @@ export async function convertPdfToImages(
   const total = pdf.numPages;
   const results: PdfPageResult[] = [];
 
+  let autoFormat: ImageFormat = 'png';
+  if (options.format === 'auto' && total > 0) {
+    const firstPage = await pdf.getPage(1);
+    const isScan = await isScanPdf(firstPage);
+    autoFormat = isScan ? 'jpg' : 'png';
+    firstPage.cleanup();
+  }
+
   for (let i = 1; i <= total; i++) {
     const page = await pdf.getPage(i);
     const baseViewport = page.getViewport({ scale: 1 });
 
-    const previewScale = 1;
+    const previewScale = 0.4;
     const previewViewport = page.getViewport({ scale: previewScale });
     
     const canvas = document.createElement('canvas');
@@ -489,27 +497,23 @@ export async function convertPdfToImages(
     const previewBlob = await canvasToFormatBlob(canvas, 'jpg', 0.8);
     const previewUrl = URL.createObjectURL(previewBlob);
     
-    let outputFormat: ImageFormat;
-    if (options.format === 'auto') {
-      const isScan = await isScanPdf(page);
-      outputFormat = isScan ? 'jpg' : 'png';
-    } else {
-      outputFormat = options.format;
-    }
-    const scale = 1;
+    canvas.width = 0;
+    canvas.height = 0;
+    
+    const outputFormat = options.format === 'auto' ? autoFormat : options.format;
 
     results.push({
       pageNumber: i,
       format: outputFormat,
       previewUrl,
-      width: Math.floor(baseViewport.width * scale),
-      height: Math.floor(baseViewport.height * scale),
+      width: Math.floor(baseViewport.width),
+      height: Math.floor(baseViewport.height),
     });
 
     options.onProgress?.(i, total);
     page.cleanup();
-    canvas.width = 0;
-    canvas.height = 0;
+    
+    await new Promise((r) => setTimeout(r, 0));
   }
 
   await loadingTask.destroy();
