@@ -131,7 +131,7 @@ async function isScanPdf(page: pdfjsLib.PDFPageProxy): Promise<boolean> {
 
     const ops = await page.getOperatorList();
     const hasTextOp = ops.fnArray.some((f: number) => f === 32);
-    const hasImageOp = ops.fnArray.some((f: number) => f === 35);
+    const hasImageOp = ops.fnArray.some((f: number) => f === 35 || f === 85);
     
     const fullPageImage = await calcFullImageCoverage(page);
     
@@ -361,7 +361,7 @@ async function canvasToFormatBlob(
 ): Promise<Blob> {
   const blob = await canvasToBlob(canvas, format, quality);
   
-  if (dpi && dpi !== 96) {
+  if (dpi && dpi !== 72) {
     if (format === 'png') {
       console.log('[DPI DEBUG] canvasToFormatBlob: calling setPngDpi with dpi=', dpi);
       return await setPngDpi(blob, dpi);
@@ -579,93 +579,76 @@ export function formatBytes(bytes: number): string {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
 }
 
-const TILE_SIZE = 2000;
+function createPHYsChunk(dpiX: number, dpiY: number): Uint8Array {
+  const ppmX = Math.round(dpiX / 0.0254);
+  const ppmY = Math.round(dpiY / 0.0254);
+  
+  const data = new Uint8Array(9);
+  writeUInt32BE(data, 0, ppmX);
+  writeUInt32BE(data, 4, ppmY);
+  data[8] = 1;
+  
+  const type = new TextEncoder().encode('pHYs');
+  const crcData = new Uint8Array(4 + data.length);
+  crcData.set(type, 0);
+  crcData.set(data, 4);
+  
+  const crcValue = crc32(crcData);
+  
+  const chunk = new Uint8Array(12 + data.length);
+  writeUInt32BE(chunk, 0, data.length);
+  chunk.set(type, 4);
+  chunk.set(data, 8);
+  writeUInt32BE(chunk, 8 + data.length, crcValue);
+  
+  return chunk;
+}
 
-async function renderPageWithTiles(
-  page: pdfjsLib.PDFPageProxy,
-  viewport: pdfjsLib.PageViewport,
-  dpi: number,
-): Promise<Blob> {
-  const pageW = Math.round(viewport.width);
-  const pageH = Math.round(viewport.height);
+function insertChunk(pngBuffer: Uint8Array, newChunk: Uint8Array): Uint8Array {
+  const pngSig = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+  const result = new Uint8Array(pngBuffer.length + newChunk.length);
   
-  console.log(`[TILE DEBUG] renderPageWithTiles called! pageW=${pageW}, pageH=${pageH}, scale=${viewport.scale}, dpi=${dpi}`);
-  
-  const fullPixels = new Uint8Array(pageW * pageH * 4);
-  
-  for (let offsetY = 0; offsetY < pageH; offsetY += TILE_SIZE) {
-    for (let offsetX = 0; offsetX < pageW; offsetX += TILE_SIZE) {
-      const tileW = Math.min(TILE_SIZE, pageW - offsetX);
-      const tileH = Math.min(TILE_SIZE, pageH - offsetY);
-      
-      const tileCanvas = new OffscreenCanvas(tileW, tileH);
-      const ctx = tileCanvas.getContext('2d');
-      if (!ctx) continue;
-      
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, tileW, tileH);
-      
-      const tileViewport = page.getViewport({
-        scale: viewport.scale,
-        offsetX: -offsetX,
-        offsetY: -offsetY,
-        width: tileW,
-        height: tileH,
-      } as { scale: number; offsetX?: number; offsetY?: number; width?: number; height?: number });
-      
-      await page.render({
-        canvas: tileCanvas as unknown as HTMLCanvasElement,
-        canvasContext: ctx as unknown as CanvasRenderingContext2D,
-        viewport: tileViewport,
-      }).promise;
-      
-      const imgData = ctx.getImageData(0, 0, tileW, tileH);
-      const tilePixel = imgData.data;
-      
-      for (let y = 0; y < tileH; y++) {
-        const srcRowStart = y * tileW * 4;
-        const dstRowStart = ((offsetY + y) * pageW + offsetX) * 4;
-        fullPixels.set(
-          tilePixel.subarray(srcRowStart, srcRowStart + tileW * 4),
-          dstRowStart,
-        );
-      }
-      
-      tileCanvas.width = 0;
-      tileCanvas.height = 0;
-    }
+  let ptr = 0;
+  for (const b of pngSig) {
+    result[ptr++] = b;
   }
   
-  console.log(`[TILE DEBUG] Starting UPNG encoding via Worker`);
+  let offset = 8;
+  let inserted = false;
   
-  const worker = new Worker(new URL('./worker-upng.ts', import.meta.url), {
-    type: 'module',
-  });
-  
-  const result = await new Promise<Uint8Array>((resolve, reject) => {
-    worker.onmessage = (e) => {
-      worker.terminate();
-      if (e.data.error) {
-        reject(new Error(e.data.error));
-      } else {
-        resolve(e.data);
-      }
-    };
+  while (offset < pngBuffer.length) {
+    if (offset + 12 > pngBuffer.length) break;
     
-    worker.onerror = (err) => {
-      worker.terminate();
-      reject(err);
-    };
+    const length = (pngBuffer[offset] << 24) | (pngBuffer[offset + 1] << 16) | 
+                   (pngBuffer[offset + 2] << 8) | pngBuffer[offset + 3];
+    const type = String.fromCharCode(pngBuffer[offset + 4], pngBuffer[offset + 5], 
+                                     pngBuffer[offset + 6], pngBuffer[offset + 7]);
     
-    worker.postMessage(
-      { pixelData: fullPixels, w: pageW, h: pageH, dpi },
-      [fullPixels.buffer],
-    );
-  });
+    if (offset + 12 + length > pngBuffer.length) break;
+    
+    if (type === 'pHYs') {
+      offset += 12 + length;
+      continue;
+    }
+    
+    if (!inserted && (type === 'IDAT' || type === 'IEND')) {
+      result.set(newChunk, ptr);
+      ptr += newChunk.length;
+      inserted = true;
+    }
+    
+    const chunkEnd = offset + 12 + length;
+    result.set(pngBuffer.subarray(offset, chunkEnd), ptr);
+    ptr += chunkEnd - offset;
+    offset = chunkEnd;
+  }
   
-  console.log(`[TILE DEBUG] UPNG encoding completed, length=${result.length}`);
+  if (!inserted) {
+    result.set(newChunk, ptr);
+    ptr += newChunk.length;
+  }
   
-  return new Blob([new Uint8Array(result)], { type: 'image/png' });
+  return result.subarray(0, ptr);
 }
 
 async function renderPageToCanvas(
@@ -675,24 +658,36 @@ async function renderPageToCanvas(
   quality: number,
   dpi: number,
 ): Promise<Blob> {
+  const width = Math.floor(viewport.width);
+  const height = Math.floor(viewport.height);
+  
   if (typeof OffscreenCanvas !== 'undefined') {
-    const canvas = new OffscreenCanvas(Math.floor(viewport.width), Math.floor(viewport.height));
+    const canvas = new OffscreenCanvas(width, height);
     const ctx = canvas.getContext('2d');
     if (ctx) {
       ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      await page.render({ canvas: canvas as unknown as HTMLCanvasElement, canvasContext: ctx as unknown as CanvasRenderingContext2D, viewport }).promise;
-      let blob = await canvas.convertToBlob({ type: MIME_TYPES[format], quality });
+      ctx.fillRect(0, 0, width, height);
+      ctx.imageSmoothingEnabled = dpi < 600;
+      ctx.imageSmoothingQuality = 'high';
+      await page.render({ 
+        canvas: canvas as unknown as HTMLCanvasElement, 
+        canvasContext: ctx as unknown as CanvasRenderingContext2D, 
+        viewport,
+        background: 'white',
+      }).promise;
       
-      if (dpi !== 96) {
-        if (format === 'jpg') {
-          const arrayBuf = await blob.arrayBuffer();
-          const jpgRaw = new Uint8Array(arrayBuf);
-          const jpgWithDpi = injectExifDpi(jpgRaw, Math.round(dpi), Math.round(dpi));
-          blob = new Blob([new Uint8Array(jpgWithDpi)], { type: 'image/jpeg' });
-        } else if (format === 'png') {
-          blob = await setPngDpi(blob, Math.round(dpi));
-        }
+      let blob = await canvas.convertToBlob({ type: MIME_TYPES[format], quality });
+      if (dpi !== 72 && format === 'png') {
+        const arrayBuf = await blob.arrayBuffer();
+        const pngRaw = new Uint8Array(arrayBuf);
+        const pHYsChunk = createPHYsChunk(dpi, dpi);
+        const finalPng = insertChunk(pngRaw, pHYsChunk);
+        blob = new Blob([new Uint8Array(finalPng)], { type: 'image/png' });
+      } else if (dpi !== 72 && format === 'jpg') {
+        const arrayBuf = await blob.arrayBuffer();
+        const jpgRaw = new Uint8Array(arrayBuf);
+        const jpgWithDpi = injectExifDpi(jpgRaw, Math.round(dpi), Math.round(dpi));
+        blob = new Blob([new Uint8Array(jpgWithDpi)], { type: 'image/jpeg' });
       }
       return blob;
     }
@@ -701,11 +696,19 @@ async function renderPageToCanvas(
     const canvas = document.createElement('canvas');
     const context = canvas.getContext('2d');
     if (!context) throw new Error('Failed to get canvas context');
-    canvas.width = Math.floor(viewport.width);
-    canvas.height = Math.floor(viewport.height);
+    canvas.width = width;
+    canvas.height = height;
     context.fillStyle = '#ffffff';
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    await page.render({ canvas, canvasContext: context, viewport }).promise;
+    context.fillRect(0, 0, width, height);
+    context.imageSmoothingEnabled = dpi < 600;
+    context.imageSmoothingQuality = 'high';
+    await page.render({ 
+      canvas, 
+      canvasContext: context, 
+      viewport,
+      background: 'white',
+    }).promise;
+    
     return await canvasToFormatBlob(canvas, format, quality, dpi);
   }
 }
@@ -715,6 +718,7 @@ export async function renderPdfPageToBlob(
   pageNumber: number,
   options: PdfConvertOptions,
 ): Promise<Blob> {
+  console.log('=== pdfToImage v4.0 ===');
   const arrayBuffer = await file.arrayBuffer();
   const loadingTask = pdfjsLib.getDocument({
     data: arrayBuffer,
@@ -772,7 +776,7 @@ export async function renderPdfPageToBlob(
   const scale = targetDpi / 72;
   const viewport = page.getViewport({ scale });
   
-  console.log(`[RENDER DEBUG] targetDpi=${targetDpi}, outputFormat=${outputFormat}, scale=${scale}, viewport.width=${viewport.width}`);
+  console.log(`[RENDER DEBUG] targetDpi=${targetDpi}, outputFormat=${outputFormat}, scale=${scale}, viewport.width=${viewport.width}, viewport.height=${viewport.height}`);
   
   let blob: Blob;
   
@@ -781,16 +785,14 @@ export async function renderPdfPageToBlob(
     if (rawJpeg) {
       const jpgWithDpi = injectExifDpi(rawJpeg, Math.round(targetDpi), Math.round(targetDpi));
       blob = new Blob([new Uint8Array(jpgWithDpi)], { type: 'image/jpeg' });
-    } else if (typeof OffscreenCanvas !== 'undefined' && targetDpi >= 600) {
-      blob = await renderPageWithTiles(page, viewport, targetDpi);
     } else {
       blob = await renderPageToCanvas(page, viewport, outputFormat, options.quality, targetDpi);
     }
-  } else if (typeof OffscreenCanvas !== 'undefined' && targetDpi >= 600) {
-    blob = await renderPageWithTiles(page, viewport, targetDpi);
   } else {
     blob = await renderPageToCanvas(page, viewport, outputFormat, options.quality, targetDpi);
   }
+  
+  console.log(`[RENDER DEBUG] Final blob size: ${(blob.size / 1024 / 1024).toFixed(2)} MB`);
   
   page.cleanup();
   await loadingTask.destroy();
