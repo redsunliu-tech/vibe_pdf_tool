@@ -25,66 +25,6 @@ export interface PdfConvertOptions {
   outputFormat?: ImageFormat;
 }
 
-async function extractRawJpeg(page: pdfjsLib.PDFPageProxy): Promise<Uint8Array | null> {
-  try {
-    const operators = await page.getOperatorList();
-    const { fnArray, argsArray } = operators;
-    const OPS = pdfjsLib.OPS;
-    
-    for (let i = 0; i < fnArray.length; i++) {
-      const op = fnArray[i];
-      
-      if (op === OPS.paintImageXObject || op === OPS.paintInlineImageXObject) {
-        const imgName = argsArray[i][0];
-        
-        if (typeof imgName === 'string') {
-          const imgObj = await new Promise((resolve) => {
-            page.objs.get(imgName, resolve);
-          });
-          
-          if (!imgObj || typeof imgObj !== 'object') continue;
-          
-          const obj = imgObj as Record<string, unknown>;
-          
-          let isJpegType = false;
-          
-          if (obj.dict && typeof obj.dict === 'object') {
-            const dict = obj.dict as Record<string, unknown>;
-            if (dict.get && typeof dict.get === 'function') {
-              const filter = dict.get('Filter');
-              if (filter && typeof filter === 'object') {
-                const filterObj = filter as Record<string, unknown>;
-                if (typeof filterObj.name === 'string') {
-                  switch (filterObj.name) {
-                    case 'DCTDecode':
-                    case 'JPXDecode':
-                      isJpegType = true;
-                      break;
-                  }
-                }
-              }
-            }
-          }
-          
-          if (!isJpegType && obj.data && obj.data instanceof Uint8Array) {
-            const data = obj.data;
-            if (data.length >= 2 && data[0] === 0xFF && data[1] === 0xD8) {
-              isJpegType = true;
-            }
-          }
-          
-          if (isJpegType && obj.data && obj.data instanceof Uint8Array) {
-            return obj.data;
-          }
-        }
-      }
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 async function calcFullImageCoverage(page: pdfjsLib.PDFPageProxy): Promise<boolean> {
   try {
     const operators = await page.getOperatorList();
