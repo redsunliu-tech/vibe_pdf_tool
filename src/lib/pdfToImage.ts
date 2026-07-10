@@ -374,20 +374,12 @@ async function canvasToFormatBlob(
   return blob;
 }
 
-async function detectPageDpi(page: pdfjsLib.PDFPageProxy): Promise<number> {
-  const view = page.view;
-  const pageWidthInches = (view[2] - view[0]) / 72;
-  const pageHeightInches = (view[3] - view[1]) / 72;
-
-  console.log('[DPI DEBUG] detectPageDpi: pageWidthInches:', pageWidthInches, 'pageHeightInches:', pageHeightInches);
-
+async function getNativeImageResolution(page: pdfjsLib.PDFPageProxy): Promise<{ width: number; height: number } | null> {
   try {
     const operators = await page.getOperatorList();
     const { fnArray, argsArray } = operators;
     let maxImageWidth = 0;
     let maxImageHeight = 0;
-
-    console.log('[DPI DEBUG] detectPageDpi: operators found:', fnArray.length);
 
     for (let i = 0; i < fnArray.length; i++) {
       const fn = fnArray[i];
@@ -395,52 +387,34 @@ async function detectPageDpi(page: pdfjsLib.PDFPageProxy): Promise<number> {
 
       if (fn === pdfjsLib.OPS.paintImageXObject) {
         const objId = args[0];
-        
         if (typeof objId === 'string') {
-          console.log('[DPI DEBUG] detectPageDpi: found paintImageXObject, objId:', objId);
-          
           const imgObj = await new Promise((resolve) => {
             page.objs.get(objId, resolve);
           });
           
-          console.log('[DPI DEBUG] detectPageDpi: imgObj:', imgObj, 'type:', typeof imgObj);
-          
           if (imgObj && typeof imgObj === 'object') {
             const obj = imgObj as Record<string, unknown>;
-            console.log('[DPI DEBUG] detectPageDpi: imgObj keys:', Object.keys(obj));
-            
             let imgWidth: number | undefined;
-              let imgHeight: number | undefined;
-              
-              if (typeof obj.width === 'number' && typeof obj.height === 'number') {
-                imgWidth = obj.width;
-                imgHeight = obj.height;
-                console.log('[DPI DEBUG] detectPageDpi: got dimensions from obj: width=', imgWidth, 'height=', imgHeight);
-              } else if (obj.bitmap && typeof obj.bitmap === 'object') {
-                const bitmap = obj.bitmap as Record<string, unknown>;
-                imgWidth = bitmap.width as number | undefined;
-                imgHeight = bitmap.height as number | undefined;
-                console.log('[DPI DEBUG] detectPageDpi: got dimensions from bitmap: width=', imgWidth, 'height=', imgHeight);
-              }
+            let imgHeight: number | undefined;
+            
+            if (typeof obj.width === 'number' && typeof obj.height === 'number') {
+              imgWidth = obj.width;
+              imgHeight = obj.height;
+            } else if (obj.bitmap && typeof obj.bitmap === 'object') {
+              const bitmap = obj.bitmap as Record<string, unknown>;
+              imgWidth = bitmap.width as number | undefined;
+              imgHeight = bitmap.height as number | undefined;
+            }
             
             if (typeof imgWidth === 'number' && typeof imgHeight === 'number') {
               maxImageWidth = Math.max(maxImageWidth, imgWidth);
               maxImageHeight = Math.max(maxImageHeight, imgHeight);
-              console.log('[DPI DEBUG] detectPageDpi: updated maxImageWidth=', maxImageWidth, 'maxImageHeight=', maxImageHeight);
             }
           }
         }
-      } else if (
-        fn === pdfjsLib.OPS.paintImageMaskXObject ||
-        fn === pdfjsLib.OPS.paintInlineImageXObject
-      ) {
+      } else if (fn === pdfjsLib.OPS.paintImageMaskXObject || fn === pdfjsLib.OPS.paintInlineImageXObject) {
         const imgData = args[0];
-        if (
-          imgData &&
-          typeof imgData === 'object' &&
-          typeof imgData.width === 'number' &&
-          typeof imgData.height === 'number'
-        ) {
+        if (imgData && typeof imgData === 'object' && typeof imgData.width === 'number' && typeof imgData.height === 'number') {
           maxImageWidth = Math.max(maxImageWidth, imgData.width);
           maxImageHeight = Math.max(maxImageHeight, imgData.height);
         }
@@ -474,32 +448,14 @@ async function detectPageDpi(page: pdfjsLib.PDFPageProxy): Promise<number> {
       }
     }
 
-    console.log('[DPI DEBUG] detectPageDpi: maxImageWidth=', maxImageWidth, 'maxImageHeight=', maxImageHeight);
-
     if (maxImageWidth > 0 && maxImageHeight > 0) {
-      const dpiX = Math.round(maxImageWidth / pageWidthInches);
-      const dpiY = Math.round(maxImageHeight / pageHeightInches);
-      const detectedDpi = Math.round((dpiX + dpiY) / 2);
-      
-      console.log('[DPI DEBUG] detectPageDpi: dpiX=', dpiX, 'dpiY=', dpiY, 'detectedDpi=', detectedDpi);
-      
-      if (detectedDpi < 140) {
-        console.log('[DPI DEBUG] detectPageDpi: returning 72');
-        return 72;
-      } else if (detectedDpi < 290) {
-        console.log('[DPI DEBUG] detectPageDpi: returning 150');
-        return 150;
-      } else {
-        console.log('[DPI DEBUG] detectPageDpi: returning 300');
-        return 300;
-      }
+      return { width: maxImageWidth, height: maxImageHeight };
     }
-  } catch (e) {
-    console.log('[DPI DEBUG] detectPageDpi: ERROR:', e);
+  } catch {
+    // ignore errors
   }
 
-  console.log('[DPI DEBUG] detectPageDpi: returning default 72');
-  return 72;
+  return null;
 }
 
 export async function convertPdfToImages(
@@ -682,11 +638,13 @@ async function renderPageToCanvas(
         const pngRaw = new Uint8Array(arrayBuf);
         const pHYsChunk = createPHYsChunk(dpi, dpi);
         const finalPng = insertChunk(pngRaw, pHYsChunk);
+        //const finalPngBuffer = finalPng.buffer.slice(finalPng.byteOffset, finalPng.byteOffset + finalPng.byteLength);
         blob = new Blob([new Uint8Array(finalPng)], { type: 'image/png' });
       } else if (dpi !== 72 && format === 'jpg') {
         const arrayBuf = await blob.arrayBuffer();
         const jpgRaw = new Uint8Array(arrayBuf);
         const jpgWithDpi = injectExifDpi(jpgRaw, Math.round(dpi), Math.round(dpi));
+        //const jpgBuffer = jpgWithDpi.buffer.slice(jpgWithDpi.byteOffset, jpgWithDpi.byteOffset + jpgWithDpi.byteLength);
         blob = new Blob([new Uint8Array(jpgWithDpi)], { type: 'image/jpeg' });
       }
       return blob;
@@ -718,7 +676,6 @@ export async function renderPdfPageToBlob(
   pageNumber: number,
   options: PdfConvertOptions,
 ): Promise<Blob> {
-  console.log('=== pdfToImage v4.0 ===');
   const arrayBuffer = await file.arrayBuffer();
   const loadingTask = pdfjsLib.getDocument({
     data: arrayBuffer,
@@ -730,69 +687,63 @@ export async function renderPdfPageToBlob(
   const pdf = await loadingTask.promise;
   const page = await pdf.getPage(pageNumber);
 
+  const isScan = await isScanPdf(page);
+  
   let outputFormat: ImageFormat;
   if (options.outputFormat) {
     outputFormat = options.outputFormat;
   } else if (options.format === 'auto') {
-    const isScan = await isScanPdf(page);
     outputFormat = isScan ? 'jpg' : 'png';
   } else {
     outputFormat = options.format;
   }
   
-  const tempCanvas = document.createElement('canvas');
-  const tempContext = tempCanvas.getContext('2d');
-  if (tempContext) {
-    const tempViewport = page.getViewport({ scale: 1 });
-    tempCanvas.width = Math.floor(tempViewport.width);
-    tempCanvas.height = Math.floor(tempViewport.height);
-    tempContext.fillStyle = '#ffffff';
-    tempContext.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
-    await page.render({ canvas: tempCanvas, canvasContext: tempContext, viewport: tempViewport }).promise;
-  }
-  
   let targetDpi = options.dpi;
+  let nativeResolution: { width: number; height: number } | null = null;
   
-  if (targetDpi === 'original') {
-    if (outputFormat === 'png') {
-      targetDpi = 300;
-    } else {
-      const originalDpi = await detectPageDpi(page);
-      const isScan = await isScanPdf(page);
-      if (!isScan) {
+  if (isScan) {
+    nativeResolution = await getNativeImageResolution(page);
+    
+    if (targetDpi === 'original' && nativeResolution) {
+      const pageView = page.view;
+      const pageWidthInPoints = pageView[2] - pageView[0];
+      const pageHeightInPoints = pageView[3] - pageView[1];
+      const pageWidthInInches = pageWidthInPoints / 72;
+      const pageHeightInInches = pageHeightInPoints / 72;
+      
+      const dpiX = Math.round(nativeResolution.width / pageWidthInInches);
+      const dpiY = Math.round(nativeResolution.height / pageHeightInInches);
+      const detectedDpi = Math.round((dpiX + dpiY) / 2);
+      
+      if (detectedDpi < 140) {
+        targetDpi = 72;
+      } else if (detectedDpi < 290) {
+        targetDpi = 150;
+      } else if (detectedDpi < 590) {
         targetDpi = 300;
       } else {
-        if (originalDpi < 140) {
-          targetDpi = 72;
-        } else if (originalDpi < 290) {
-          targetDpi = 150;
-        } else {
-          targetDpi = 300;
-        }
+        targetDpi = 600;
       }
+    } else if (targetDpi === 'original') {
+      targetDpi = 300;
     }
+  } else if (targetDpi === 'original') {
+    targetDpi = 300;
   }
   
-  const scale = targetDpi / 72;
-  const viewport = page.getViewport({ scale });
+  let viewport: pdfjsLib.PageViewport;
   
-  console.log(`[RENDER DEBUG] targetDpi=${targetDpi}, outputFormat=${outputFormat}, scale=${scale}, viewport.width=${viewport.width}, viewport.height=${viewport.height}`);
-  
-  let blob: Blob;
-  
-  if (outputFormat === 'jpg' && options.qualityMode === 'original') {
-    const rawJpeg = await extractRawJpeg(page);
-    if (rawJpeg) {
-      const jpgWithDpi = injectExifDpi(rawJpeg, Math.round(targetDpi), Math.round(targetDpi));
-      blob = new Blob([new Uint8Array(jpgWithDpi)], { type: 'image/jpeg' });
-    } else {
-      blob = await renderPageToCanvas(page, viewport, outputFormat, options.quality, targetDpi);
-    }
+  if (isScan && nativeResolution) {
+    const pageView = page.view;
+    const pageWidthInPoints = pageView[2] - pageView[0];
+    const scale = nativeResolution.width / pageWidthInPoints;
+    viewport = page.getViewport({ scale });
   } else {
-    blob = await renderPageToCanvas(page, viewport, outputFormat, options.quality, targetDpi);
+    const scale = targetDpi / 72;
+    viewport = page.getViewport({ scale });
   }
   
-  console.log(`[RENDER DEBUG] Final blob size: ${(blob.size / 1024 / 1024).toFixed(2)} MB`);
+  const blob = await renderPageToCanvas(page, viewport, outputFormat, options.quality, targetDpi);
   
   page.cleanup();
   await loadingTask.destroy();
