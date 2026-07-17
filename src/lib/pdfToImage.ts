@@ -479,77 +479,7 @@ export function formatBytes(bytes: number): string {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
 }
 
-function createPHYsChunk(dpiX: number, dpiY: number): Uint8Array {
-  const ppmX = Math.round(dpiX / 0.0254);
-  const ppmY = Math.round(dpiY / 0.0254);
-  
-  const data = new Uint8Array(9);
-  writeUInt32BE(data, 0, ppmX);
-  writeUInt32BE(data, 4, ppmY);
-  data[8] = 1;
-  
-  const type = new TextEncoder().encode('pHYs');
-  const crcData = new Uint8Array(4 + data.length);
-  crcData.set(type, 0);
-  crcData.set(data, 4);
-  
-  const crcValue = crc32(crcData);
-  
-  const chunk = new Uint8Array(12 + data.length);
-  writeUInt32BE(chunk, 0, data.length);
-  chunk.set(type, 4);
-  chunk.set(data, 8);
-  writeUInt32BE(chunk, 8 + data.length, crcValue);
-  
-  return chunk;
-}
 
-function insertChunk(pngBuffer: Uint8Array, newChunk: Uint8Array): Uint8Array {
-  const pngSig = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
-  const result = new Uint8Array(pngBuffer.length + newChunk.length);
-  
-  let ptr = 0;
-  for (const b of pngSig) {
-    result[ptr++] = b;
-  }
-  
-  let offset = 8;
-  let inserted = false;
-  
-  while (offset < pngBuffer.length) {
-    if (offset + 12 > pngBuffer.length) break;
-    
-    const length = (pngBuffer[offset] << 24) | (pngBuffer[offset + 1] << 16) | 
-                   (pngBuffer[offset + 2] << 8) | pngBuffer[offset + 3];
-    const type = String.fromCharCode(pngBuffer[offset + 4], pngBuffer[offset + 5], 
-                                     pngBuffer[offset + 6], pngBuffer[offset + 7]);
-    
-    if (offset + 12 + length > pngBuffer.length) break;
-    
-    if (type === 'pHYs') {
-      offset += 12 + length;
-      continue;
-    }
-    
-    if (!inserted && (type === 'IDAT' || type === 'IEND')) {
-      result.set(newChunk, ptr);
-      ptr += newChunk.length;
-      inserted = true;
-    }
-    
-    const chunkEnd = offset + 12 + length;
-    result.set(pngBuffer.subarray(offset, chunkEnd), ptr);
-    ptr += chunkEnd - offset;
-    offset = chunkEnd;
-  }
-  
-  if (!inserted) {
-    result.set(newChunk, ptr);
-    ptr += newChunk.length;
-  }
-  
-  return result.subarray(0, ptr);
-}
 
 async function renderPageToCanvas(
   page: pdfjsLib.PDFPageProxy,
@@ -561,58 +491,50 @@ async function renderPageToCanvas(
   const width = Math.floor(viewport.width);
   const height = Math.floor(viewport.height);
   
+  let canvas: HTMLCanvasElement | OffscreenCanvas;
+  let ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+  
   if (typeof OffscreenCanvas !== 'undefined') {
-    const canvas = new OffscreenCanvas(width, height);
-    const ctx = canvas.getContext('2d');
-    if (ctx) {
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, width, height);
-      ctx.imageSmoothingEnabled = dpi < 600;
-      ctx.imageSmoothingQuality = 'high';
-      await page.render({ 
-        canvas: canvas as unknown as HTMLCanvasElement, 
-        canvasContext: ctx as unknown as CanvasRenderingContext2D, 
-        viewport,
-        background: 'white',
-      }).promise;
-      
-      let blob = await canvas.convertToBlob({ type: MIME_TYPES[format], quality });
-      if (dpi !== 72 && format === 'png') {
-        const arrayBuf = await blob.arrayBuffer();
-        const pngRaw = new Uint8Array(arrayBuf);
-        const pHYsChunk = createPHYsChunk(dpi, dpi);
-        const finalPng = insertChunk(pngRaw, pHYsChunk);
-        //const finalPngBuffer = finalPng.buffer.slice(finalPng.byteOffset, finalPng.byteOffset + finalPng.byteLength);
-        blob = new Blob([new Uint8Array(finalPng)], { type: 'image/png' });
-      } else if (dpi !== 72 && format === 'jpg') {
-        const arrayBuf = await blob.arrayBuffer();
-        const jpgRaw = new Uint8Array(arrayBuf);
-        const jpgWithDpi = injectExifDpi(jpgRaw, Math.round(dpi), Math.round(dpi));
-        //const jpgBuffer = jpgWithDpi.buffer.slice(jpgWithDpi.byteOffset, jpgWithDpi.byteOffset + jpgWithDpi.byteLength);
-        blob = new Blob([new Uint8Array(jpgWithDpi)], { type: 'image/jpeg' });
-      }
-      return blob;
-    }
-    throw new Error('Failed to get canvas context');
+    canvas = new OffscreenCanvas(width, height);
+    ctx = canvas.getContext('2d');
   } else {
-    const canvas = document.createElement('canvas');
-    const context = canvas.getContext('2d');
-    if (!context) throw new Error('Failed to get canvas context');
+    canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
-    context.fillStyle = '#ffffff';
-    context.fillRect(0, 0, width, height);
-    context.imageSmoothingEnabled = dpi < 600;
-    context.imageSmoothingQuality = 'high';
-    await page.render({ 
-      canvas, 
-      canvasContext: context, 
-      viewport,
-      background: 'white',
-    }).promise;
-    
-    return await canvasToFormatBlob(canvas, format, quality, dpi);
+    ctx = canvas.getContext('2d');
   }
+  
+  if (!ctx) throw new Error('Failed to get canvas context');
+  
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, width, height);
+  ctx.imageSmoothingEnabled = dpi < 600;
+  ctx.imageSmoothingQuality = 'high';
+  
+  await page.render({ 
+    canvas: canvas as unknown as HTMLCanvasElement, 
+    canvasContext: ctx as unknown as CanvasRenderingContext2D, 
+    viewport,
+    background: 'white',
+  }).promise;
+  
+  let blob: Blob;
+  
+  if (canvas instanceof OffscreenCanvas) {
+    blob = await canvas.convertToBlob({ type: MIME_TYPES[format], quality });
+  } else {
+    blob = await canvasToBlob(canvas, format, quality);
+  }
+  
+  if (dpi !== 72) {
+    if (format === 'png') {
+      blob = await setPngDpi(blob, dpi);
+    } else if (format === 'jpg') {
+      blob = await setJpegDpi(blob, dpi);
+    }
+  }
+  
+  return blob;
 }
 
 export async function renderPdfPageToBlob(
