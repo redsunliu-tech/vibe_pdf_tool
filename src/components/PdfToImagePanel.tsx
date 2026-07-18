@@ -31,6 +31,7 @@ export function PdfToImagePanel() {
   const [format, setFormat] = useState<ImageFormat | 'auto'>('auto');
   const [dpi, setDpi] = useState<number | 'original'>('original');
   const [quality, setQuality] = useState(0.92);
+  const [savedQuality, setSavedQuality] = useState(0.92);
   const [qualityMode, setQualityMode] = useState<QualityMode>('original');
   const [converting, setConverting] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -59,6 +60,15 @@ export function PdfToImagePanel() {
       cache.clear();
     };
   }, [syncPreviewUrls]);
+
+  useEffect(() => {
+    if (qualityMode === 'original') {
+      setSavedQuality(quality);
+      setQuality(0.95);
+    } else {
+      setQuality(savedQuality);
+    }
+  }, [qualityMode]);
 
   useEffect(() => {
     if (progressBarRef.current) {
