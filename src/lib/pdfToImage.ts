@@ -429,8 +429,9 @@ export async function convertPdfToImages(
     
     canvas.width = Math.floor(previewViewport.width);
     canvas.height = Math.floor(previewViewport.height);
-    context.fillStyle = '#ffffff';
-    context.fillRect(0, 0, canvas.width, canvas.height);
+    //context.fillStyle = '#00000000';
+    //context.fillRect(0, 0, canvas.width, canvas.height);
+    context.clearRect(0, 0, canvas.width, canvas.height);
 
     await page.render({ canvas, canvasContext: context, viewport: previewViewport }).promise;
     
@@ -506,15 +507,19 @@ async function renderPageToCanvas(
   
   if (!ctx) throw new Error('Failed to get canvas context');
   
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, width, height);
-  ctx.imageSmoothingEnabled = dpi < 600;
+  //ctx.fillStyle = '#00000000';
+  //ctx.fillRect(0, 0, width, height);
+  ctx.clearRect(0, 0, width, height);
+  //ctx.imageSmoothingEnabled = dpi < 600;
+  ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
+  
   
   await page.render({ 
     canvas: canvas as unknown as HTMLCanvasElement, 
     canvasContext: ctx as unknown as CanvasRenderingContext2D, 
     viewport,
+    intent: "any", 
     background: 'white',
   }).promise;
   
